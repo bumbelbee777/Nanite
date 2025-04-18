@@ -1,138 +1,202 @@
 import re
 import asyncio
+from collections import deque
+from enum import Enum, auto
+from typing import Any, Dict, List, Tuple, Union, Optional
 
-class BytecodeEngine:
+# Placeholder for concept graph import
+def get_concept_graph():
+    # In real implementation, import and initialize ConceptGraph
+    from sillyai.concept import ConceptGraph
+    return ConceptGraph()
+
+# ==================== Type Definitions ====================
+TypeName = str  # e.g. 'int', 'f32', 'Prop', 'Vec3<f32>'
+Value = Union[int, float, bool, str, complex, Any]
+
+class TypedValue:
+    """Wrapper for a value with an associated static type."""
+    def __init__(self, type_name: TypeName, value: Value):
+        self.type = type_name
+        self.value = value
+    def __repr__(self):
+        return f"TypedValue(type={self.type}, value={self.value})"
+
+# ==================== Instruction & Opcode ====================
+class Opcode(Enum):
+    NOP       = auto()
+    HLT       = auto()
+    LOAD      = auto()
+    STORE     = auto()
+    ADD       = auto()
+    SUB       = auto()
+    MUL       = auto()
+    DIV       = auto()
+    ASSERT    = auto()
+    JM        = auto()
+    CJM       = auto()
+    CALL      = auto()
+    RET       = auto()
+    AWAIT     = auto()
+    # Logic
+    AND       = auto()
+    OR        = auto()
+    NOT       = auto()
+    IMPLIES   = auto()
+    IFF       = auto()
+    FORALL    = auto()
+    EXISTS    = auto()
+    # Concept ops
+    CORR      = auto()
+    ENER      = auto()
+    CASSERT   = auto()
+    CQUERY    = auto()
+    # ... more opcodes as needed
+
+Instruction = Tuple[Opcode, List[str]]
+
+# ==================== SillyVM ====================
+class SillyVM:
     def __init__(self):
-        # The list to hold the bytecode instructions
-        self.code = []
+        # code memory: list of instructions
+        self.code: List[Instruction] = []
+        # heterogeneous registers: GPRs and concept registers
+        self.regs: Dict[str, TypedValue] = {f"R{i}": TypedValue('int', 0) for i in range(16)}
+        self.concepts = get_concept_graph()
+        # special regs
+        self.ip: int = 0
+        self.sp: int = 0
+        self.stack: List[TypedValue] = []
+        # call stack frames
+        self.call_stack: Deque[int] = deque()
+        # type environment for routines
+        self.types: Dict[str, Tuple[List[TypeName], TypeName]] = {}
+        # halted flag
+        self.halted: bool = False
 
-        # The stack for holding values
-        self.stack = []
+    # ---------- Parsing ----------
+    def parse(self, asm: str) -> None:
+        """Parse SILLY assembly into internal instructions."""
+        lines = asm.splitlines()
+        for raw in lines:
+            line = raw.split('//')[0].strip()
+            if not line: continue
+            parts = re.split(r'[ ,]+', line)
+            op_str, *args = parts
+            try:
+                op = Opcode[op_str]
+            except KeyError:
+                raise ValueError(f"Unknown opcode: {op_str}")
+            self.code.append((op, args))
 
-        # The registers for holding temporary results
-        self.regs = [0] * 10  # Let's assume we have 10 general-purpose registers for simplicity
-
-        # Instruction pointer
-        self.ip = 0  # Program Counter (Instruction Pointer)
-
-    def load_code(self, bytecode):
-        """Load bytecode into the engine."""
-        self.code = bytecode.splitlines()
-        self.ip = 0  # Reset instruction pointer
-
-    def fetch(self):
-        """Fetch the current instruction."""
-        if self.ip >= len(self.code):
-            return None  # End of code
-        instruction = self.code[self.ip]
+    # ---------- Execution Helpers ----------
+    def fetch(self) -> Optional[Instruction]:
+        if self.ip < 0 or self.ip >= len(self.code):
+            return None
+        instr = self.code[self.ip]
         self.ip += 1
-        return instruction.strip()
+        return instr
 
-    def decode(self, instruction):
-        """Decode the instruction into a tuple of operation and operands."""
-        parts = re.split(r'\s+', instruction)
-        op = parts[0]
-        args = parts[1:]
-        return op, args
+    def get_typed(self, operand: str) -> TypedValue:
+        # immediate literal or register
+        if operand in self.regs:
+            return self.regs[operand]
+        if operand.isdigit():
+            return TypedValue('int', int(operand))
+        # extend to floats, bools, etc.
+        raise ValueError(f"Unknown operand: {operand}")
 
-    def execute(self, op, args):
-        """Execute a decoded instruction."""
-        if op == "ADD":
-            self.add(args)
-        elif op == "MUL":
-            self.mul(args)
-        elif op == "MOV":
-            self.mov(args)
-        elif op == "PUSH":
-            self.push(args)
-        elif op == "POP":
-            self.pop(args)
-        elif op == "RET":
-            self.ret(args)
+    def set_reg(self, reg: str, tv: TypedValue) -> None:
+        # type check can go here
+        self.regs[reg] = tv
+
+    # ---------- Instruction Dispatch ----------
+    def step(self) -> None:
+        instr = self.fetch()
+        if instr is None:
+            self.halted = True
+            return
+        op, args = instr
+        handler = getattr(self, f"op_{op.name.lower()}", None)
+        if not handler:
+            raise NotImplementedError(f"Handler for {op} not implemented")
+        handler(args)
+
+    async def run_async(self) -> None:
+        """Run VM asynchronously."""
+        while not self.halted:
+            self.step()
+            await asyncio.sleep(0)
+
+    def run(self) -> None:
+        """Run VM synchronously."""
+        while not self.halted:
+            self.step()
+
+    # ---------- Opcode Handlers ----------
+    def op_nop(self, args):
+        pass
+
+    def op_hlt(self, args):
+        self.halted = True
+
+    def op_load(self, args):
+        dest, addr = args
+        # for data-type agnostic registers, assume integer address
+        val = self.stack[int(addr)]
+        self.set_reg(dest, val)
+
+    def op_store(self, args):
+        src, addr = args
+        tv = self.get_typed(src)
+        self.stack.insert(int(addr), tv)
+
+    def op_add(self, args):
+        r1, r2, rd = args
+        v1 = self.get_typed(r1)
+        v2 = self.get_typed(r2)
+        if v1.type != v2.type:
+            raise TypeError("ADD operand type mismatch")
+        res = v1.value + v2.value
+        self.set_reg(rd, TypedValue(v1.type, res))
+
+    def op_sub(self, args):
+        # similar to add
+        pass
+
+    def op_mul(self, args):
+        # ... implement
+        pass
+
+    def op_div(self, args):
+        pass
+
+    def op_assert(self, args):
+        cond = args[0]
+        tv = self.get_typed(cond)
+        if not tv.value:
+            raise AssertionError(f"ASSERT failed: {cond}")
+
+    def op_jm(self, args):
+        addr = int(args[0])
+        self.ip = addr
+
+    def op_cjm(self, args):
+        cond, addr = args
+        tv = self.get_typed(cond)
+        if tv.value:
+            self.ip = int(addr)
+
+    def op_call(self, args):
+        label = args[0]
+        # for simplicity label is instruction index
+        self.call_stack.append(self.ip)
+        self.ip = int(label)
+
+    def op_ret(self, args):
+        if self.call_stack:
+            self.ip = self.call_stack.pop()
         else:
-            raise ValueError(f"Unknown instruction: {op}")
+            self.halted = True
 
-    def add(self, args):
-        """Perform addition: ADD x, y, Rz"""
-        x, y, rz = args
-        x_val = self.get_value(x)
-        y_val = self.get_value(y)
-        self.regs[int(rz[1])] = x_val + y_val
-
-    def sub(self, args):
-        """Perform subtraction: SUB x, y, Rz"""
-        x, y, rz = args
-        x_val = self.get_value(x)
-        y_val = self.get_value(y)
-        self.regs[int(rz[1])] = x_val - y_val
-
-    def mul(self, args):
-        """Perform multiplication: MUL x, y, Rz"""
-        x, y, rz = args
-        x_val = self.get_value(x)
-        y_val = self.get_value(y)
-        self.regs[int(rz[1])] = x_val * y_val
-
-    def div(self, args):
-        """Perform division: DIV x, y, Rz"""
-        x, y, rz = args
-        x_val = self.get_value(x)
-        y_val = self.get_value(y)
-        self.regs[int(rz[1])] = x_val // y_val  # Integer division
-
-    def mov(self, args):
-        """Move value: MOV x, Ry"""
-        x, ry = args
-        self.regs[int(ry[1])] = self.get_value(x)
-
-    def store(self, args):
-        """Store value: STORE Ry, x"""
-        ry, x = args
-        self.regs[int(ry[1])] = self.get_value(x)
-
-    def push(self, args):
-        """Push a value onto the stack: PUSH x"""
-        x = args[0]
-        self.stack.append(self.get_value(x))
-
-    def pop(self, args):
-        """Pop a value from the stack: POP Ry"""
-        ry = args[0]
-        self.regs[int(ry[1])] = self.stack.pop()
-
-    def ret(self, args):
-        """Return from procedure (just for simulation)."""
-        return
-
-    def get_value(self, value):
-        """Resolve a value (either a register or immediate)."""
-        if value.startswith("R"):
-            return self.regs[int(value[1])]
-        else:
-            return int(value)  # Assuming it's an immediate integer
-
-    def run(self):
-        """Run the bytecode instructions asynchronously."""
-        while self.ip < len(self.code):
-            instruction = self.fetch()
-            if instruction:
-                op, args = self.decode(instruction)
-                self.execute(op, args)
-            else:
-                break
-        return self.regs
-
-    async def async_run(self):
-        """Run bytecode asynchronously, allowing for non-blocking operations."""
-        while self.ip < len(self.code):
-            instruction = self.fetch()
-            if instruction:
-                op, args = self.decode(instruction)
-                self.execute(op, args)
-                await asyncio.sleep(0)  # Yield control to other tasks
-            else:
-                break
-        return self.regs
-    
-    def __str__(self):
-        return f"VM: {self.regs}\n Stack: {self.stack}\nCode:\n" + "\n".join(self.code) + f"\nIP: {self.ip}"
+    # ... more handlers for logic, concept, etc.
