@@ -6,7 +6,7 @@ SillyISA is the custom neuro-symbolic ISA for SillyAI, allowing for formalizatio
 
 ## High-Level Overview
 
-SillyISA combines typical instructions and features found in load-store architectures and VLIW/EPIC (where every instruction is explicitly parallelized) with custom ones related to SillyAI features such as concept graph manipulation and neural representations.
+SillyISA combines typical instructions and features found in load-store architectures and VLIW/EPIC (where every instruction is explicitly parallelized), though in SillyISA's case all instructions and routines are ran asynchronously to prevent blocking and increase throughput. Lastly, SillyISA has instructions related to SillyAI-specific features such as concept graph manipulation and neural representations.
 
 ## Registers
 
@@ -14,7 +14,7 @@ SillyISA has the typical GPRs (`R0`-`Rn`) in addition to concept registers (`C0`
 
 ## Memory
 
-SillyISA segments memory into two areas: concept memory (higher half) and standard memory (lower half).
+SillyISA segments memory into three areas: concept memory (high), data memory (middle), and code (low), with optional tagged access enforcement, per-zone protection flags, and dynamic resizing to accommodate growing abstractions or runtime demands; concept memory may additionally support lazy paging, logical compaction, or persistent mapping for symbolic graphs, while data memory can employ NaN-boxing or region-based allocation to enhance performance and safety under high-throughput workloads.
 
 ## Instruction List
 
@@ -39,13 +39,15 @@ SillyISA segments memory into two areas: concept memory (higher half) and standa
 
 ### 🧮 Arithmetic & Math
 
+| **Mnemonic**   | **Category**         | **Description**                                                                 |
+|----------------|----------------------|---------------------------------------------------------------------------------|
 | `ADD`          | Arithmetic            | Adds two values.                                                               |
 | `SUB`          | Arithmetic            | Subtracts one value from another.                                              |
 | `MUL`          | Arithmetic            | Multiplies two values.                                                         |
 | `DIV`          | Arithmetic            | Divides one value by another.                                                  |
 | `POW`          | Arithmetic            | Exponentiates a base to a power.                                               |
 | `SQRT`         | Arithmetic            | Square root.                                                                   |
-| `EXP`          | Arithmetic            | Exponential (e^x).                                                              |
+| `EXP`          | Arithmetic            | Exponential (e^x).                                                             |
 | `SIN`          | Trigonometric         | Sine function.                                                                 |
 | `COS`          | Trigonometric         | Cosine function.                                                               |
 | `TAN`          | Trigonometric         | Tangent function.                                                              |
@@ -55,10 +57,12 @@ SillyISA segments memory into two areas: concept memory (higher half) and standa
 | `LOG`          | Math                  | Logarithm base 2.                                                              |
 | `LOG10`        | Math                  | Logarithm base 10.                                                             |
 | `LN`           | Math                  | Natural logarithm.                                                             |
-| `ERR`          | Math                  | Error function (Gaussian integral approximation).                             |
+| `ERR`          | Math                  | Error function (Gaussian integral approximation).                              |
 
 ### 🔁 Logical & Boolean Ops
 
+| **Mnemonic**   | **Category**         | **Description**                                                                 |
+|----------------|----------------------|---------------------------------------------------------------------------------|
 | `AND`          | Logic                 | Logical conjunction.                                                           |
 | `OR`           | Logic                 | Logical disjunction.                                                           |
 | `NOT`          | Logic                 | Logical negation.                                                              |
@@ -75,6 +79,8 @@ SillyISA segments memory into two areas: concept memory (higher half) and standa
 
 ### 🧠 Concept Memory Ops
 
+| **Mnemonic**   | **Category**         | **Description**                                                                 |
+|----------------|----------------------|---------------------------------------------------------------------------------|
 | `CORR`         | Concept Ops           | Correlates two concepts with a specified weight.                               |
 | `ENER`         | Concept Ops           | Stores the energy of a concept to memory.                                      |
 | `CASSERT`      | Concept Logic         | Asserts a concept relationship or state.                                       |
@@ -114,15 +120,25 @@ To make the development experience nicer, SillyISA assembler uses static typing 
 | **Conceptual separation** | Execution is fast and dumb; analysis, optimization, and correctness happen above the ISA level. Clean separation. |
 | **Concept/Prop special types** | Enables deep symbolic reasoning and neural-symbolic bridges (like propagating concept graphs or evaluating logical statements). |
 
-## Routines
+## Routines and Variables
 
 SillyISA supports routines, which can take parameters and return values, the basic structure of a routine looks like this:
 
 ```
-.MyRoutine(a, b) {
+.MyRoutine(a: r1<int>, b: r2<int>) {
     // Do stuff, for our case we'll just add the numbers
     RET a + b
 }
 
 MyRoutine(1, 2)
+```
+
+In addition to this, variables are also supported as aliases to registers. This allows for more expressive and higher-level code, all while maintaining low-level precision and control:
+
+```
+.AddAndMultiply(a: r0<int>, b: r1<int>, c: r2<int>) {
+    %result: r3<int>
+    result = (a + b) * c
+    RET result
+}
 ```

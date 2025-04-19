@@ -1,103 +1,152 @@
+import asyncio
+import logging
 from collections import defaultdict
 import heapq
 
+# Configure module-level logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+handler = logging.StreamHandler()
+formatter = logging.Formatter('[%(asctime)s] %(levelname)s in %(module)s: %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
 class Connection:
-    def __init__(self, target, weight, relationship):
+    def __init__(self, target: str, weight: float = 1.0, relationship: str = "co-occurrence"):
         self.target = target
         self.weight = weight
         self.relationship = relationship
 
+    def __repr__(self):
+        return f"Connection(target={self.target!r}, weight={self.weight}, relationship={self.relationship!r})"
+
 class Concept:
-    def __init__(self, name, energy=0.0):
+    def __init__(self, name: str, energy: float = 0.0):
         self.name = name
         self.energy = energy
-        self.connections = []
-        self.access_count = 0  # Count of accesses for LFU
-        self.last_access_time = 0  # Tracks the last time this concept was accessed
+        self.connections: list[Connection] = []
+        self.access_count = 0
+        self.last_access_time = 0
+
+    def __repr__(self):
+        conns = ', '.join([repr(c) for c in self.connections])
+        return (
+            f"Concept(name={self.name!r}, energy={self.energy:.3f}, "
+            f"access_count={self.access_count}, last_access_time={self.last_access_time}, "
+            f"connections=[{conns}])"
+        )
 
 class ConceptGraph:
-    def __init__(self, decay_rate=0.45):
-        self.concepts = defaultdict(Concept)
+    def __init__(self, decay_rate: float = 0.45, debug: bool = False):
+        self.concepts: dict[str, Concept] = {}
         self.decay_rate = decay_rate
-        self.time = 0  # To keep track of the access time for LFU
+        self.time = 0
+        self.debug = debug
+        if self.debug:
+            logger.setLevel(logging.DEBUG)
+        else:
+            logger.setLevel(logging.INFO)
 
-    def add_concept(self, name):
-        self.concepts[name] = Concept(name)
+    def add_concept(self, name: str) -> None:
+        if name not in self.concepts:
+            self.concepts[name] = Concept(name)
+            logger.debug(f"Added concept: {name}")
 
-    def add_connection(self, source, target, weight=1.0, relationship="co-occurrence"):
-        if source not in self.concepts:
-            self.add_concept(source)
-        if target not in self.concepts:
-            self.add_concept(target)
-        
-        self.concepts[source].connections.append(
-            Connection(target, weight, relationship))
-        self.concepts[target].connections.append(
-            Connection(source, weight, relationship))
+    def add_connection(self, source: str, target: str, weight: float = 1.0, relationship: str = "co-occurrence") -> None:
+        self.add_concept(source)
+        self.add_concept(target)
+        self.concepts[source].connections.append(Connection(target, weight, relationship))
+        self.concepts[target].connections.append(Connection(source, weight, relationship))
+        logger.debug(f"Connected {source} <-> {target} with weight={weight}, relationship={relationship}")
 
-    def propagate_energy(self, transfer_factor=0.1):
+    async def _propagate_energy(self, transfer_factor: float = 0.1) -> None:
         new_energy = defaultdict(float)
-        for concept in self.concepts.values():
+        # Gather tasks for parallel simulation
+        for concept in list(self.concepts.values()):
             for conn in concept.connections:
+                # calculate transfer
                 transferred = concept.energy * conn.weight * transfer_factor
                 new_energy[conn.target] += transferred
                 new_energy[concept.name] -= transferred
-        
-        # Update energy and access count
+        # Apply updates
         for name, delta in new_energy.items():
             if name in self.concepts:
-                self.concepts[name].energy = max(0, self.concepts[name].energy + delta)
+                concept = self.concepts[name]
+                old_energy = concept.energy
+                concept.energy = max(0.0, old_energy + delta)
                 self._update_access(name)
+                logger.debug(f"Energy update for {name}: {old_energy:.3f} -> {concept.energy:.3f}")
+                # allow other tasks to run
+                await asyncio.sleep(0)
 
-    def _update_access(self, concept_name):
-        """ Update access count and time for LFU. """
+    def propagate_energy(self, transfer_factor: float = 0.1) -> None:
+        """
+        Synchronous wrapper for async energy propagation.
+        """
+        logger.info("Starting energy propagation...")
+        try:
+            asyncio.run(self._propagate_energy(transfer_factor))
+        except RuntimeError:
+            # If an event loop is already running (e.g., in notebooks), use create_task
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(self._propagate_energy(transfer_factor))
+        logger.info("Energy propagation complete.")
+
+    async def _update_n_cluster(self, min_energy: float = 0.01, purge_threshold: int = 5) -> None:
+        # Decay and collect low-energy concepts
+        to_remove = []
+        for name, concept in list(self.concepts.items()):
+            old_energy = concept.energy
+            concept.energy *= self.decay_rate
+            if concept.energy < min_energy:
+                to_remove.append(name)
+            logger.debug(f"Decayed {name}: {old_energy:.3f} -> {concept.energy:.3f}")
+            await asyncio.sleep(0)
+        # Remove low-energy
+        for name in to_remove:
+            self._purge_concept(name)
+        # LFU-based purge
+        heap = [(c.energy, c.access_count, c.name) for c in self.concepts.values()]
+        heapq.heapify(heap)
+        while len(self.concepts) > purge_threshold:
+            energy, count, name = heapq.heappop(heap)
+            if name in self.concepts:
+                logger.debug(f"LFU purge concept: {name} with energy={energy:.3f}, access_count={count}")
+                self._purge_concept(name)
+            await asyncio.sleep(0)
+
+    def update_n_cluster(self, min_energy: float = 0.01, purge_threshold: int = 5) -> None:
+        """
+        Synchronous wrapper for async cluster update (decay & purge).
+        """
+        logger.info("Starting cluster update (decay & LFU purge)...")
+        try:
+            asyncio.run(self._update_n_cluster(min_energy, purge_threshold))
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(self._update_n_cluster(min_energy, purge_threshold))
+        logger.info("Cluster update complete.")
+
+    def _update_access(self, concept_name: str) -> None:
         concept = self.concepts[concept_name]
         concept.access_count += 1
         concept.last_access_time = self.time
         self.time += 1
+        logger.debug(f"Access updated for {concept_name}: count={concept.access_count}, time={concept.last_access_time}")
 
-    def update_n_cluster(self, min_energy=0.01, purge_threshold=5):
-        """ Apply decay, remove low-energy concepts, and implement LFU purge. """
-        to_remove = []
-
-        # Apply decay and determine low-energy concepts
-        for name, concept in list(self.concepts.items()):
-            concept.energy *= self.decay_rate
-            if concept.energy < min_energy:
-                to_remove.append(name)
-
-        # Remove low-energy concepts and cleanup connections
-        for name in to_remove:
+    def _purge_concept(self, name: str) -> None:
+        if name in self.concepts:
             del self.concepts[name]
             for concept in self.concepts.values():
-                concept.connections = [
-                    conn for conn in concept.connections
-                    if conn.target != name
-                ]
+                concept.connections = [c for c in concept.connections if c.target != name]
+            logger.debug(f"Purged concept: {name}")
 
-        # Now handle LFU purging - find concepts with low access count and low energy
-        low_energy_and_access = []
+    def __str__(self) -> str:
+        lines = []
+        for name, c in self.concepts.items():
+            conns = ', '.join(f"{conn.target}({conn.weight:.2f},{conn.relationship})" for conn in c.connections)
+            lines.append(f"{name}: Energy={c.energy:.2f}, Access={c.access_count}, Connections=[{conns}]")
+        return "\n".join(lines)
 
-        for concept in self.concepts.values():
-            heapq.heappush(low_energy_and_access, (concept.energy, concept.access_count, concept.name))
-
-        # Remove concepts that have both low energy and access count
-        while len(low_energy_and_access) > purge_threshold:
-            _, _, concept_name = heapq.heappop(low_energy_and_access)
-            if concept_name in self.concepts:
-                del self.concepts[concept_name]
-                for concept in self.concepts.values():
-                    concept.connections = [
-                        conn for conn in concept.connections
-                        if conn.target != concept_name
-                    ]
-    
-    def __str__(self):
-        return "\n".join(
-            f"{name} (Energy: {c.energy:.2f}, Access Count: {c.access_count}): "
-            f"{[f'{conn.target}({conn.weight}, {conn.relationship})' for conn in c.connections]}"
-            for name, c in self.concepts.items()
-        )
-
-    def __repr__(self):
+    def __repr__(self) -> str:
         return self.__str__()
