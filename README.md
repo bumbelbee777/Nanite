@@ -1,4 +1,4 @@
-# SillyAI - The next big step towards AGI?
+# SillyAI - The next step towards AGI?
 
 SillyAI is an advanced, complex-valued transformer model that also supports traditional real-valued operation if desired. This flexibility allows it to adapt to a wide range of tasks across various domains, from signal processing to quantum physics simulations. SillyAI introduces innovative features like concept graphing, enabling it to visualize and understand the relationships between concepts with a weighting mechanism based on energy values. This graph dynamically updates through an LFU algorithm, thereby improving its reasoning capabilities over time.
 

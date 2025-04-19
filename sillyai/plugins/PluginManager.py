@@ -1,6 +1,6 @@
 import os
 import importlib.util
-from .plugin import SillyPlugin
+from plugin import SillyPlugin
 
 class PluginManager:
     def __init__(self, plugin_dir: str):

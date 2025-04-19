@@ -5,7 +5,8 @@ import math
 import time
 from collections import deque
 from enum import Enum, auto
-from typing import Any, Dict, List, Tuple, Union, Optional, Deque
+from typing import Any, Dict, List, Tuple, Union, Optional, Deque, Set
+from dataclasses import dataclass
 
 # Initialize concept graph
 
@@ -19,6 +20,13 @@ Value = Union[int, float, bool, str, complex, Any]
 # Regex patterns for typed literals
 _INT_PATTERN = re.compile(r'^(-?\d+)(?:_(i|u)(8|16|32|64|128))$')
 _FLOAT_PATTERN = re.compile(r'^(-?\d+(?:\.\d*)?)(?:_(f)(32|64|128))$')
+
+@dataclass
+class LogicalBinding:
+    """Represents a logical binding for symbolic operations"""
+    name: str
+    value: Any
+    constraints: Set[str]
 
 class TypedValue:
     """Wrapper for a value with an associated static type."""
@@ -52,6 +60,27 @@ class Opcode(Enum):
 
 Instruction = Tuple[Opcode, List[str]]
 
+class SymbolicEvaluator:
+    """Handles symbolic computation and unification"""
+    def __init__(self):
+        self.bindings: Dict[str, LogicalBinding] = {}
+    
+    def unify(self, term1: str, term2: str) -> bool:
+        # Implement unification algorithm
+        if term1 in self.bindings and term2 in self.bindings:
+            return self.bindings[term1].value == self.bindings[term2].value
+        elif term1 in self.bindings:
+            self.bindings[term2] = self.bindings[term1]
+            return True
+        elif term2 in self.bindings:
+            self.bindings[term1] = self.bindings[term2]
+            return True
+        else:
+            binding = LogicalBinding(term1, None, set())
+            self.bindings[term1] = binding
+            self.bindings[term2] = binding
+            return True
+
 class SillyVM:
     def __init__(self):
         self.code: List[Instruction] = []
@@ -63,6 +92,8 @@ class SillyVM:
         self.stack: List[TypedValue] = []
         self.call_stack: Deque[int] = deque()
         self.halted: bool = False
+        self.symbolic = SymbolicEvaluator()
+        self.type_registry = {}
 
     def parse(self, asm: str) -> None:
         lines = asm.splitlines()
@@ -178,6 +209,32 @@ class SillyVM:
     @staticmethod
     def run_parallel(vms: List['SillyVM']) -> None:
         asyncio.run(asyncio.gather(*(vm.run_async() for vm in vms)))
+
+    def run_bytecode_from_file(self, filepath: str) -> None:
+        """
+        Reads, parses and executes bytecode from a file.
+        
+        Args:
+            filepath: Path to the .sisa or .txt file containing SillyISA bytecode
+            
+        Raises:
+            FileNotFoundError: If the bytecode file doesn't exist
+            ValueError: If the bytecode contains syntax errors
+        """
+        try:
+            with open(filepath, 'r') as f:
+                bytecode = f.read()
+                
+            try:
+                self.parse(bytecode)  # Parse the bytecode
+                self.run()           # Execute the bytecode
+            except ValueError as e:
+                raise ValueError(f"Error parsing bytecode: {str(e)}")
+            except Exception as e:
+                raise RuntimeError(f"Error executing bytecode: {str(e)}")
+                
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Bytecode file not found: {filepath}")
 
     # Opcode Handlers
     def op_nop(self, args: List[str]) -> None:
@@ -391,54 +448,90 @@ class SillyVM:
         self.set_reg(dest, TypedValue('bool', v1.value == v2.value))
 
     def op_forall(self, args: List[str]) -> None:
-        raise NotImplementedError("FORALL not implemented yet")
+        """Universal quantification"""
+        var, domain, predicate = args
+        result = True
+        for val in self.evaluate_domain(domain):
+            self.symbolic.bindings[var] = LogicalBinding(var, val, set())
+            if not self.evaluate_predicate(predicate):
+                result = False
+                break
+        self.set_reg('R0', TypedValue('bool', result))
 
     def op_exists(self, args: List[str]) -> None:
-        raise NotImplementedError("EXISTS not implemented yet")
+        """Existential quantification"""
+        var, domain, predicate = args
+        result = False
+        for val in self.evaluate_domain(domain):
+            self.symbolic.bindings[var] = LogicalBinding(var, val, set())
+            if self.evaluate_predicate(predicate):
+                result = True
+                break
+        self.set_reg('R0', TypedValue('bool', result))
 
     def op_unify(self, args: List[str]) -> None:
-        raise NotImplementedError("UNIFY not implemented")
+        """Unify two terms"""
+        term1, term2, dest = args
+        result = self.symbolic.unify(term1, term2)
+        self.set_reg(dest, TypedValue('bool', result))
 
     def op_resolve(self, args: List[str]) -> None:
-        raise NotImplementedError("RESOLVE not implemented")
+        """Logical resolution"""
+        clause1, clause2, dest = args
+        c1 = self.evaluate_clause(clause1)
+        c2 = self.evaluate_clause(clause2)
+        resolvent = self.resolve_clauses(c1, c2)
+        self.set_reg(dest, TypedValue('Clause', resolvent))
 
     def op_contradicts(self, args: List[str]) -> None:
-        raise NotImplementedError("CONTRADICTS not implemented")
-
-    def op_corr(self, args: List[str]) -> None:
-        src, tgt, w = args
-        self.concepts.add_connection(src, tgt, float(w))
-
-    def op_ener(self, args: List[str]) -> None:
-        name, val = args
-        self.concepts.add_concept(name)
-        self.concepts.concepts[name].energy = float(val)
-
-    def op_cassert(self, args: List[str]) -> None:
-        self.concepts.add_concept(args[0])
+        """Check for contradictions"""
+        stmt1, stmt2, dest = args
+        s1 = self.evaluate_statement(stmt1)
+        s2 = self.evaluate_statement(stmt2)
+        result = s1.contradicts(s2)
+        self.set_reg(dest, TypedValue('bool', result))
 
     def op_cbind(self, args: List[str]) -> None:
-        raise NotImplementedError("CBIND not implemented")
-
-    def op_cquery(self, args: List[str]) -> None:
-        name, dest = args
-        energy = self.concepts.concepts.get(name, type('X', (), {'energy': 0.0})).energy
-        self.set_reg(dest, TypedValue('f64', energy))
+        """Bind concept to logical variable"""
+        var, concept, dest = args
+        success = self.concepts.bind_variable(var, concept)
+        self.set_reg(dest, TypedValue('bool', success))
 
     def op_cand(self, args: List[str]) -> None:
-        raise NotImplementedError("CAND not implemented")
+        """Concept AND operation"""
+        c1, c2, dest = args
+        energy = min(self.concepts.get_energy(c1), 
+                    self.concepts.get_energy(c2))
+        self.set_reg(dest, TypedValue('f64', energy))
 
     def op_cor(self, args: List[str]) -> None:
-        raise NotImplementedError("COR not implemented")
+        """Concept OR operation"""
+        c1, c2, dest = args
+        energy = max(self.concepts.get_energy(c1), 
+                    self.concepts.get_energy(c2))
+        self.set_reg(dest, TypedValue('f64', energy))
 
     def op_cnot(self, args: List[str]) -> None:
-        raise NotImplementedError("CNOT not implemented")
+        """Concept NOT operation"""
+        concept, dest = args
+        energy = 1.0 - self.concepts.get_energy(concept)
+        self.set_reg(dest, TypedValue('f64', energy))
 
     def op_cif(self, args: List[str]) -> None:
-        raise NotImplementedError("CIF not implemented")
+        """Conditional concept activation"""
+        condition, concept, dest = args
+        cond_val = self.get_typed(condition).value
+        if cond_val:
+            self.concepts.activate(concept)
+            self.set_reg(dest, TypedValue('bool', True))
+        else:
+            self.set_reg(dest, TypedValue('bool', False))
 
     def op_ccmp(self, args: List[str]) -> None:
-        raise NotImplementedError("CCMP not implemented")
+        """Compare concepts"""
+        c1, c2, dest = args
+        similarity = self.concepts.compare(c1, c2)
+        self.set_reg(dest, TypedValue('f64', similarity))
 
     def op_clean(self, args: List[str]) -> None:
         self.concepts.update_n_cluster()

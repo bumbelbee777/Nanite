@@ -10,7 +10,7 @@ SillyISA combines typical instructions and features found in load-store architec
 
 ## Registers
 
-SillyISA has the typical GPRs (`R0`-`Rn`) in addition to concept registers (`C0`-`Cn`), an instruction pointer (`ip`), a state register (`sr`), a stack pointer (`sp`), a base pointer (`bp`), and a frame pointer (`fp`).
+SillyISA has the typical GPRs (`R0`-`Rn`), vector registers (`V0-Vn`), as well as concept registers (`C0`-`Cn`), an instruction pointer (`ip`), a state register (`sr`), a stack pointer (`sp`), a base pointer (`bp`), and a frame pointer (`fp`).
 
 ## Memory
 
@@ -141,4 +141,36 @@ In addition to this, variables are also supported as aliases to registers. This 
     result = (a + b) * c
     RET result
 }
+```
+
+## Example of Bytecode: Pythagorean Theorem Proof
+
+```
+.Proof() {
+    %a: r0<int> = 3           // r0 = a = 3
+    %b: r1<int> = 4           // r1 = b = 4
+    %c: r2<int> = 5           // r2 = c = 5
+
+    r4 = POW r0, 2            // r4 = a^2 = 9
+    r5 = POW r1, 2            // r5 = b^2 = 16
+
+    r3 = ADD r4, r5           // r3 = a^2 + b^2 = 25
+
+    r6 = POW r2, 2            // r6 = c^2 = 25
+
+    r7 = r3 - r6              // r7 = a^2 + b^2 - c^2 = 0
+
+    CJM r7 != 0, Fail()       // Jump to Fail() if r7 is not 0 (proof fails)
+
+    ASSERT true               // Proof holds, assert true
+    HLT                       // Halt program
+}
+
+.Fail() {
+    ASSERT false              // Proof failed, assert false
+    HLT                       // Halt program
+}
+
+// Call the Proof() routine to execute it
+Proof()
 ```

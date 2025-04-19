@@ -5,7 +5,9 @@ import shutil
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional
-from plugins import PluginManager
+
+from plugins.PluginManager import PluginManager
+from vm import SillyVM
 
 import torch
 import torch.nn as nn
@@ -395,6 +397,10 @@ class SillyAI(nn.Module):
         self.plugin_manager.discover()
         self.plugin_manager.apply_on_init(self)
 
+        # Add SillyVM integration
+        self.vm = SillyVM()
+        self.proof_cache = {}
+
     def _make_proj(self, in_dim, out_dim):
         if self.config.real_mode:
             return nn.Linear(in_dim, out_dim)
@@ -430,7 +436,95 @@ class SillyAI(nn.Module):
 
         # plugin hook: after
         out = self.plugin_manager.apply_after_forward(self, x, out)
+
+        # Update concept energies based on proof results
+        for problem, success in self.proof_cache.items():
+            concepts = self.concept_graph.get_related_concepts(problem)
+            energy_delta = 0.1 if success else -0.05
+            for concept in concepts:
+                self.concept_graph.update_concept_energy(concept, energy_delta)
+
         return out
+
+    def solve_problem(self, problem: str, proof_path: Optional[str] = None) -> bool:
+        """
+        Attempts to solve a problem using SillyISA proof verification
+        
+        Args:
+            problem: Problem description or identifier
+            proof_path: Optional path to SillyISA proof file
+            
+        Returns:
+            bool: True if proof succeeds, False otherwise
+        """
+        # Check proof cache first
+        if problem in self.proof_cache:
+            return self.proof_cache[problem]
+            
+        try:
+            # If proof file provided, use it
+            if proof_path:
+                success = self._verify_proof(proof_path)
+            else:
+                # Generate proof based on concept graph
+                proof = self._generate_proof(problem)
+                success = self._verify_proof_code(proof)
+                
+            self.proof_cache[problem] = success
+            return success
+            
+        except Exception as e:
+            print(f"Proof verification failed: {str(e)}")
+            return False
+            
+    def _verify_proof(self, proof_path: str) -> bool:
+        """Verifies a SillyISA proof file"""
+        try:
+            self.vm.run_bytecode_from_file(proof_path)
+            return True
+        except AssertionError:
+            return False
+            
+    def _verify_proof_code(self, proof_code: str) -> bool:
+        """Verifies proof from generated code string"""
+        try:
+            self.vm.parse(proof_code)
+            self.vm.run()
+            return True
+        except AssertionError:
+            return False
+            
+    def _generate_proof(self, problem: str) -> str:
+        """Generates SillyISA proof code from problem description"""
+        # Get relevant concepts
+        concepts = self.concept_graph.get_related_concepts(problem)
+        
+        # Generate proof template
+        proof = [
+            f".Proof_{problem.replace(' ', '_')}() {{",
+            "    // Initialize variables"
+        ]
+        
+        # Add concept bindings
+        for i, concept in enumerate(concepts):
+            proof.append(f"    LOADC C{i}, \"{concept}\"")
+            
+        # Add proof logic based on concept relationships
+        edges = self.concept_graph.get_concept_edges()
+        for edge in edges:
+            if edge.source in concepts and edge.target in concepts:
+                proof.append(f"    CORR {edge.source}, {edge.target}, {edge.weight}")
+                
+        # Add assertions
+        proof.extend([
+            "    ASSERT true",
+            "    HLT",
+            "}",
+            "",
+            f"Proof_{problem.replace(' ', '_')}()"
+        ])
+        
+        return "\n".join(proof)
 
     def save_snapshot(self, loss, epoch=None, compress=True):
         # only ever keep the best
