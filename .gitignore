@@ -1,4 +1,7 @@
-/__pycache__
+__pycache__/
 .idx/
 .vscode/
 *.pyc
+sillyai.egg-info/
+snapshots/
+sillyai.egg-info/SOURCES.txt

@@ -4,17 +4,17 @@ import gzip
 import shutil
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List, Any
 
-from plugins.PluginManager import PluginManager
-from vm import SillyVM
+from .plugin import PluginManager
+from .vm import SillyVM
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import fft
 
-from concept import ConceptGraph
+from .concept import ConceptGraph
 
 class ComplexOperationMixin:
     @staticmethod
@@ -35,7 +35,8 @@ class ComplexLinear(nn.Module):
         out_features: int,
         factorized: bool = False,
         rank: int = 4,
-        use_async: bool = False
+        use_async: bool = False,
+        weight_init: str = "xavier"  # Add weight_init parameter
     ):
         super().__init__()
         self.in_features = in_features
@@ -43,6 +44,7 @@ class ComplexLinear(nn.Module):
         self.factorized = factorized
         self.rank = rank
         self.use_async = use_async
+        self.weight_init = weight_init  # Store weight_init preference
 
         # parameters
         if self.factorized:
@@ -53,12 +55,22 @@ class ComplexLinear(nn.Module):
             self.B_real = nn.Parameter(torch.empty(rank, in_features))
             self.B_imag = nn.Parameter(torch.empty(rank, in_features))
             for p in (self.A_real, self.A_imag, self.B_real, self.B_imag):
-                nn.init.xavier_uniform_(p)
+                if self.weight_init == "xavier":
+                    nn.init.xavier_uniform_(p)
+                else:
+                    nn.init.kaiming_normal_(p)
         else:
             self.weight_real = nn.Parameter(torch.empty(out_features, in_features))
             self.weight_imag = nn.Parameter(torch.empty(out_features, in_features))
-            nn.init.xavier_uniform_(self.weight_real)
-            nn.init.xavier_uniform_(self.weight_imag)
+            
+            # Initialize weights based on weight_init preference
+            if self.weight_init == "xavier":
+                nn.init.xavier_uniform_(self.weight_real)
+                nn.init.xavier_uniform_(self.weight_imag)
+            else:
+                nn.init.kaiming_normal_(self.weight_real)
+                nn.init.kaiming_normal_(self.weight_imag)
+                
             self.bias = nn.Parameter(torch.zeros(out_features, 2))
 
     def forward(self, x):
@@ -101,6 +113,108 @@ class ComplexLinear(nn.Module):
 
         # synchronous fallback
         return _compute(W_block, x_cat, batch)
+    
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+class InfiniAttention(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        local_window: int = 512,
+        memory_size: int = 1024,
+        compress_ratio: int = 4,
+    ):
+        super().__init__()
+        assert embed_dim % num_heads == 0
+        self.embed_dim     = embed_dim
+        self.num_heads     = num_heads
+        self.head_dim      = embed_dim // num_heads
+        self.local_window  = local_window
+        self.memory_size   = memory_size
+        self.compress_ratio= compress_ratio
+
+        # per‑head projections
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.out    = nn.Linear(embed_dim, embed_dim)
+
+        # circular buffers for memory
+        # each is (M_total, embed_dim)
+        self.register_buffer('mem_k', torch.zeros(0, embed_dim))
+        self.register_buffer('mem_v', torch.zeros(0, embed_dim))
+
+    def _compress_and_trim(self):
+        # if we've stored more than memory_size * compress_ratio,
+        # compress blocks of size compress_ratio by averaging
+        M_tot = self.mem_k.size(0)
+        thresh = self.memory_size * self.compress_ratio
+        if M_tot > thresh:
+            # reshape to (memory_size, C, D), average over C
+            new_k = self.mem_k[-thresh:]
+            new_v = self.mem_v[-thresh:]
+            new_k = new_k.view(self.memory_size, self.compress_ratio, -1).mean(dim=1)
+            new_v = new_v.view(self.memory_size, self.compress_ratio, -1).mean(dim=1)
+            self.mem_k = new_k
+            self.mem_v = new_v
+        # then trim to last memory_size
+        if self.mem_k.size(0) > self.memory_size:
+            self.mem_k = self.mem_k[-self.memory_size:]
+            self.mem_v = self.mem_v[-self.memory_size:]
+
+    def forward(self, x):
+        """
+        x: (B, L, D)
+        returns: (B, L, D)
+        """
+        B, L, D = x.shape
+        q = self.q_proj(x)  # (B,L,D)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+
+        # 1) Local (masked) attention
+        # We'll do it in batched form by building a banded mask
+        # and using scaled dot‐product
+        qh = q.view(B, L, self.num_heads, self.head_dim).transpose(1,2)  # (B, H, L, d)
+        kh = k.view(B, L, self.num_heads, self.head_dim).transpose(1,2)
+        vh = v.view(B, L, self.num_heads, self.head_dim).transpose(1,2)
+
+        # compute full scores then mask out-of-window
+        scores = torch.matmul(qh, kh.transpose(-2,-1))  # (B,H,L,L)
+        scores = scores / math.sqrt(self.head_dim)
+        # create band mask
+        idxs = torch.arange(L, device=x.device)
+        mask = (idxs[None, :] - idxs[:, None]).abs() > self.local_window
+        scores = scores.masked_fill(mask[None,None,:,:], float('-inf'))
+        attn = torch.softmax(scores, dim=-1)
+        out_local = torch.matmul(attn, vh)               # (B,H,L,d)
+        out_local = out_local.transpose(1,2).reshape(B, L, D)
+
+        # 2) Update and compress memory
+        # flatten batch into M_new = B*L entries
+        new_k = k.reshape(B*L, D)
+        new_v = v.reshape(B*L, D)
+        self.mem_k = torch.cat([self.mem_k, new_k], dim=0)
+        self.mem_v = torch.cat([self.mem_v, new_v], dim=0)
+        self._compress_and_trim()
+
+        # 3) Linear global attention to memory via φ(·)=ELU(·)+1
+        phi_q = F.elu(q) + 1.0         # (B,L,D)
+        phi_k = F.elu(self.mem_k) + 1.0# (M,  D)
+
+        # KV aggregate: Kᵀ·V → (D, D)
+        kv = torch.einsum('md,me->de', phi_k, self.mem_v)
+
+        # context_mem = φ(q) @ kv  → (B,L,D)
+        out_mem = torch.einsum('bld,df->blf', phi_q, kv)
+
+        # 4) combine and final projection
+        out = out_local + out_mem
+        return self.out(out)
 
 class ToeplitzAttention(nn.Module):
     """
@@ -113,7 +227,8 @@ class ToeplitzAttention(nn.Module):
         real_mode: bool = False,
         factorized: bool = False,
         rank: int = 4,
-        use_async: bool = False
+        use_async: bool = False,
+        weight_init: str = "xavier"
     ):
         super().__init__()
         self.real_mode = real_mode
@@ -124,9 +239,9 @@ class ToeplitzAttention(nn.Module):
             self.k_proj = nn.Linear(embed_dim, embed_dim)
             self.v_proj = nn.Linear(embed_dim, embed_dim)
         else:
-            self.q_proj = ComplexLinear(embed_dim, embed_dim, factorized, rank)
-            self.k_proj = ComplexLinear(embed_dim, embed_dim, factorized, rank)
-            self.v_proj = ComplexLinear(embed_dim, embed_dim, factorized, rank)
+            self.q_proj = ComplexLinear(embed_dim, embed_dim, factorized, rank, weight_init=weight_init)
+            self.k_proj = ComplexLinear(embed_dim, embed_dim, factorized, rank, weight_init=weight_init)
+            self.v_proj = ComplexLinear(embed_dim, embed_dim, factorized, rank, weight_init=weight_init)
 
     def forward(self, query, key, value):
         """
@@ -291,6 +406,8 @@ class DynamicActivation(nn.Module):
 @dataclass
 class ModelConfig:
     # core dims
+    output_dim: int
+    concept_dim: int
     input_dim: int
     d_model: int
     num_layers: int
@@ -299,7 +416,10 @@ class ModelConfig:
 
     # modes
     real_mode: bool = False
-    dynamic_mode: bool = False
+    dynamic_mode: bool = True
+
+    # optimizations
+    optim_args: Optional[List[Any]] = None
 
     # complex‐linear factorization
     factorized_linear: bool = False
@@ -322,6 +442,20 @@ class ModelConfig:
 
     plugin_dir: str = "./plugins"
 
+    use_infini: bool = False
+    infini_local_window: int = 512
+    infini_mem_size: int = 1024
+    infini_compress_ratio: int = 4
+
+    def __post_init__(self):
+        # Initialize default optim_args if None
+        if self.optim_args is None:
+            self.optim_args = {
+                'use_toeplitz': False,
+                'factorized_linear': self.factorized_linear,
+                'mixed_precision': self.mixed_precision
+            }
+
 class FeedForward(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -337,22 +471,45 @@ class FeedForward(nn.Module):
 
     def _create_activation(self, config):
         if config.dynamic_mode:
-            return DynamicActivation(config.dim_ff * (1 if config.real_mode else 2), config.real_mode)
+            return DynamicActivation(
+                config.dim_ff * (1 if config.real_mode else 2),
+                real_mode=config.real_mode,
+                hidden_size=config.dynamic_hidden_dim  # Pass from config
+            )
         return nn.ReLU() if config.real_mode else DynamicActivation(config.dim_ff, config.real_mode)
 
 class TransformerBlock(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         factor = 1 if config.real_mode else 2
-        self.attn = self._create_attention(config)
-        self.ff = FeedForward(config)
+
+        if getattr(config, 'use_infini', False):
+            # use Infini-attention
+            self.attn = InfiniAttention(
+                embed_dim=config.d_model * factor,
+                num_heads=config.nhead,
+                local_window=config.infini_local_window,
+                memory_size=config.infini_mem_size,
+                compress_ratio=config.infini_compress_ratio,
+            )
+        else:
+            # your existing Toeplitz/standard attention fallback
+            self.attn = self._create_attention(config)
+
+        self.ff    = FeedForward(config)
         self.norm1 = nn.LayerNorm(config.d_model * factor)
         self.norm2 = nn.LayerNorm(config.d_model * factor)
 
     def _create_attention(self, config):
-        if config.optim_args.get('use_toeplitz', False):
-            return ToeplitzAttention(config.d_model * (1 if config.real_mode else 2))
-        return nn.MultiheadAttention(config.d_model * (1 if config.real_mode else 2), config.nhead)
+        use_toeplitz = config.optim_args.get('use_toeplitz', False) if config.optim_args else False
+        
+        return ToeplitzAttention(
+            embed_dim=config.d_model * (1 if config.real_mode else 2),
+            real_mode=config.real_mode,
+            factorized=config.factorized_linear,
+            rank=config.kronecker_rank,
+            weight_init=config.weight_init  # Pass weight_init from config
+        )
 
     def forward(self, x):
         x_attn, _ = self.attn(x, x, x)
@@ -389,7 +546,7 @@ class SillyAI(nn.Module):
         # training state
         self.best_loss = float('inf')
         self.current_epoch = 0
-        self.scaler = torch.cuda.amp.GradScaler(
+        self.scaler = torch.amp.GradScaler(
             enabled=self.config.optim_args.get('mixed_precision', True)
         )
 
@@ -403,12 +560,11 @@ class SillyAI(nn.Module):
 
     def _make_proj(self, in_dim, out_dim):
         if self.config.real_mode:
-            return nn.Linear(in_dim, out_dim)
-        return ComplexLinear(
-            in_dim, out_dim,
-            factorized=self.config.optim_args.get('factorized_linear', False),
-            rank=self.config.optim_args.get('kronecker_rank', 4)
-        )
+            return ComplexLinear(
+                in_dim, out_dim,
+                factorized=self.config.factorized_linear,  # Use direct field
+                rank=self.config.kronecker_rank
+            )
     
     def _forward_core(self, x):
         # complex fallback
@@ -507,7 +663,8 @@ class SillyAI(nn.Module):
         
         # Add concept bindings
         for i, concept in enumerate(concepts):
-            proof.append(f"    LOADC C{i}, \"{concept}\"")
+            safe_concept = concept.replace('"', '\\"')  # Escape quotes
+            proof.append(f'    LOADC C{i}, "{safe_concept}"')
             
         # Add proof logic based on concept relationships
         edges = self.concept_graph.get_concept_edges()

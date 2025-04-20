@@ -94,34 +94,106 @@ class SillyVM:
         self.halted: bool = False
         self.symbolic = SymbolicEvaluator()
         self.type_registry = {}
+        self.variables = {}  # Maps variable names to registers
 
     def parse(self, asm: str) -> None:
         lines = asm.splitlines()
         labels: Dict[str, int] = {}
         code_lines: List[str] = []
-        # First pass: labels
+        current_routine = None
+        param_bindings = {}
+        self.variables = {}  # Reset variables for new parse
+        
+        # First pass: routines and labels
         for line in lines:
             clean = line.split('//')[0].strip()
             if not clean:
                 continue
-            if clean.endswith(':'):
+                
+            # Handle variable declarations
+            if clean.startswith('%'):
+                var_decl = self.extract_var_declaration(clean)
+                if var_decl:
+                    name, reg, typ, init_val = var_decl
+                    self.variables[name] = (reg, typ)
+                    if init_val:
+                        # Add initialization instruction
+                        code_lines.append(f"MOV {init_val}, {reg}")
+                    continue
+                    
+            # Handle routine declarations
+            if clean.startswith('.'):
+                if '{' in clean:
+                    # Parse routine name and parameters
+                    routine_decl = clean[1:].split('{')[0].strip()
+                    routine_name = routine_decl.split('(')[0]
+                    # Extract parameters if any
+                    if '(' in routine_decl:
+                        params_str = routine_decl[routine_decl.find('(')+1:routine_decl.rfind(')')]
+                        params = [p.strip().split(':') for p in params_str.split(',') if p.strip()]
+                        param_bindings[routine_name] = {
+                            name.strip(): reg.strip() 
+                            for name, reg in params
+                        }
+                    
+                    labels[routine_name] = len(code_lines)
+                    current_routine = routine_name
+                    continue
+                    
+            elif clean == '}':
+                current_routine = None
+                self.variables.clear()  # Clear variables at routine end
+                continue
+                
+            elif clean.endswith(':'):
                 labels[clean[:-1]] = len(code_lines)
+                
             else:
+                # Handle routine calls with or without parentheses
+                if not any(op in clean for op in Opcode.__members__):
+                    # Extract routine name, removing parentheses if present
+                    call_name = clean.split('(')[0].strip()
+                    args = []
+                    if '(' in clean:
+                        args_str = clean[clean.find('(')+1:clean.rfind(')')]
+                        args = [a.strip() for a in args_str.split(',') if a.strip()]
+                    
+                    # If routine has parameter bindings, add MOV instructions
+                    if call_name in param_bindings:
+                        param_regs = list(param_bindings[call_name].values())
+                        for i, arg in enumerate(args):
+                            if i < len(param_regs):
+                                code_lines.append(f"MOV {arg}, {param_regs[i]}")
+                    
+                    code_lines.append(f"CALL {call_name}")
+                    continue
+                
+                # Handle variable references in expressions
+                if current_routine:
+                    # Replace variable names with their registers
+                    for var_name, (reg, _) in self.variables.items():
+                        clean = re.sub(r'\b' + var_name + r'\b', reg, clean)
+                
                 code_lines.append(clean)
+        
         # Second pass: instructions
         for line in code_lines:
             if line.startswith('PAR '):
                 subs = [s.strip() for s in line[4:].split(';') if s.strip()]
                 self.code.append((Opcode.PAR, subs))
                 continue
+                
             parts = re.split(r'[ ,]+', line)
             op_str, *args = parts
-            if op_str in ('JM', 'CJM', 'CALL'):
-                args = [str(labels.get(a, a)) for a in args]
+            
             try:
                 op = Opcode[op_str]
             except KeyError:
                 raise ValueError(f"Unknown opcode: {op_str}")
+                
+            if op_str in ('JM', 'CJM', 'CALL'):
+                args = [str(labels.get(a, a)) for a in args]
+                
             self.code.append((op, args))
 
     def fetch(self) -> Optional[Instruction]:
@@ -149,6 +221,11 @@ class SillyVM:
         return val
 
     def get_typed(self, operand: str) -> TypedValue:
+        # Check if operand is a variable name
+        if operand in self.variables:
+            reg, typ = self.variables[operand]
+            return self.regs[reg]
+        
         if operand in self.regs:
             return self.regs[operand]
         m = _INT_PATTERN.match(operand)
@@ -536,3 +613,30 @@ class SillyVM:
     def op_clean(self, args: List[str]) -> None:
         self.concepts.update_n_cluster()
         self.concepts.propagate_energy()
+
+    def extract_var_declaration(self, line: str) -> Optional[Tuple[str, str, str, Optional[str]]]:
+        """
+        Extracts variable declaration components.
+        Format: %name: reg<type> [= value]
+        Returns: (name, register, type, initial_value or None)
+        """
+        # Remove whitespace and comments
+        line = line.split('//')[0].strip()
+        if not line.startswith('%'):
+            return None
+            
+        # Split declaration and initialization
+        decl_parts = line[1:].split('=', 1)
+        decl = decl_parts[0].strip()
+        init_val = decl_parts[1].strip() if len(decl_parts) > 1 else None
+        
+        # Parse name, register and type
+        try:
+            name_reg, type_part = decl.split(':', 1)
+            name = name_reg.strip()
+            reg_type = type_part.strip()
+            reg, typ = reg_type.split('<', 1)
+            typ = typ.rstrip('>')
+            return (name, reg.strip(), typ.strip(), init_val)
+        except ValueError:
+            return None

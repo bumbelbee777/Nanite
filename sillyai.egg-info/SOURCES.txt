@@ -4,6 +4,7 @@ sillyai/__init__.py
 sillyai/__main__.py
 sillyai/ai.py
 sillyai/concept.py
+sillyai/plugin.py
 sillyai/tokenizer.py
 sillyai/vm.py
 sillyai.egg-info/PKG-INFO
@@ -11,8 +12,5 @@ sillyai.egg-info/SOURCES.txt
 sillyai.egg-info/dependency_links.txt
 sillyai.egg-info/requires.txt
 sillyai.egg-info/top_level.txt
-sillyai/plugins/PluginManager.py
-sillyai/plugins/__init__.py
-sillyai/plugins/plugin.py
 tests/test_concept.py
 tests/test_fn_approx.py

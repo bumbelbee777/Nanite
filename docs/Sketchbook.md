@@ -6,11 +6,13 @@ This is a sketchbook on implementation plans and notes for SillyAI and SillyISA 
 
 ## SillyAI
 
-Currently, SillyAI is practically fully implemented (minus advanced reasoning through SillyISA, but that's fine). It just needs real-world testing and validation. It could use additional/better plugin support and context but that's not the priority right now.
+Currently, SillyAI is practically fully implemented. It just needs real-world testing and validation. It could use additional/better plugin support and a context window but that's not the priority right now.
 
 ## SillyVM
 
-This is what needs the most work right now. First revision of spec is virtually complete, it just needs to be implemented right. For this I crafted an implementation strategy:
+This is what needs the most work right now. Sure, I got it implemented. But is it ideal? Absolutely freaking not. Does it get the job done? Maybe (currently implementing variable declaration support).
+
+First revision of spec is virtually complete, it just needs to be implemented right. For this I crafted a future rewrite strategy:
 
 - `Opcodes` enum for opcodes to allow for instructions to be tweaked easily.
 - Have a `ExpressionParser` class that parses/evaluates bytecode and expressions before organizing them into segments to then be loaded into memory easily (variable assignment).
