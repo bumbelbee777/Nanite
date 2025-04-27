@@ -9,62 +9,46 @@ class TaskComplexityEstimator(nn.Module):
     def __init__(self, config):
         super().__init__()
         embed_dim = config.d_model
-        self.probe = nn.Linear(embed_dim * 2, 1)  # Doubled feature size to capture both variance and magnitude
-        
+        self.probe = nn.Linear(embed_dim * 2, 1)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Input shape: [B, L, D, 2] (complex-valued sequence)
-        # Compute magnitude of complex features
-        magnitudes = torch.norm(x, dim=-1)  # [B, L, D]
-        
-        # Compute sequence-level magnitude features
-        mean_magnitudes = torch.mean(magnitudes, dim=1)  # [B, D]
-        
-        # Compute variance features to capture complexity
-        var_magnitudes = torch.var(magnitudes, dim=1)  # [B, D]
-        
-        # Concatenate both features
-        features = torch.cat([mean_magnitudes, var_magnitudes], dim=-1)  # [B, D*2]
-        
-        # Estimate complexity score with both magnitude and variance information
-        complexity = self.probe(features)  # [B, 1]
-        
-        # Scale to [0,1] with steeper sigmoid for better separation
+        # Same as current complexity estimator logic
+        magnitudes = torch.norm(x, dim=-1)
+        mean_magnitudes = torch.mean(magnitudes, dim=1)
+        var_magnitudes = torch.var(magnitudes, dim=1)
+        features = torch.cat([mean_magnitudes, var_magnitudes], dim=-1)
+        complexity = self.probe(features)
         return torch.sigmoid(2.0 * complexity).squeeze(-1)  # [B]
 
+    def complexity(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward(x)
+
 class FeatureRouter(nn.Module):
-    """Routes features through different pathways based on complexity"""
     def __init__(self, config):
         super().__init__()
-        d_model = config.d_model
-        self.attention = nn.MultiheadAttention(d_model, 1)
-        # Add projection layers with proper kronecker_rank
-        self.input_proj = ComplexLinear(
-            d_model, 
-            d_model, 
-            factorized=config.factorized_linear,
-            kronecker_rank=config.kronecker_rank
-        )
-        self.output_proj = ComplexLinear(
-            d_model, 
-            d_model,
-            factorized=config.factorized_linear,
-            kronecker_rank=config.kronecker_rank
-        )
-        
-    def forward(self, x: torch.Tensor, pos_enc: nn.Module) -> torch.Tensor:
+        self.attention = nn.MultiheadAttention(config.d_model, 1)
+        self.input_proj = ComplexLinear(config.d_model, config.d_model, factorized=config.factorized_linear, kronecker_rank=config.kronecker_rank)
+        self.output_proj = ComplexLinear(config.d_model, config.d_model, factorized=config.factorized_linear, kronecker_rank=config.kronecker_rank)
+
+    def forward(self, x: torch.Tensor, pos_enc: nn.Module, complexity: torch.Tensor) -> torch.Tensor:
         # Apply positional encoding conditionally based on feature importance
-        encoded = pos_enc(x)  # [B, L, D, 2]
-        
+        encoded = pos_enc(x)
+
         # Project input and extract real parts for attention
         projected = self.input_proj(x)
-        x_real = projected[..., 0]  # [B, L, D]
-        
+        x_real = projected[..., 0]
+
         # Compute attention scores
         attn_output, _ = self.attention(x_real, x_real, x_real)
-        
+
         # Scale positional encoding by attention
-        scale = torch.sigmoid(attn_output).unsqueeze(-1)  # [B, L, D, 1]
-        encoded = encoded * scale
-        
+        scale = torch.sigmoid(attn_output).unsqueeze(-1)
+
+        # Adjust scale based on complexity
+        adjusted_scale = scale * complexity.unsqueeze(-1).unsqueeze(-1)
+
+        # Apply the adjusted scale
+        encoded = encoded * adjusted_scale
+
         # Project output
         return self.output_proj(encoded)

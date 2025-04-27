@@ -3,7 +3,7 @@ import gzip
 import json
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Union, Dict
 
 import torch
 import torch.nn as nn
@@ -26,95 +26,204 @@ class SillyAI(nn.Module):
         super().__init__()
         self.config = config
         
-        # Validate dimensions
-        if config.input_dim <= 0 or config.d_model <= 0 or config.output_dim <= 0:
-            raise ValueError(
-                f"Invalid dimensions: input_dim={config.input_dim}, "
-                f"d_model={config.d_model}, output_dim={config.output_dim}"
-            )
+        # Initialize core components
+        self._init_core_components()
         
-        # --- Fix kronecker_rank for ComplexLinear ---
-        def valid_kronecker_rank(rank, in_dim, out_dim):
-            # Always at least 1, at most min(in_dim, out_dim)//2 or 4
-            max_rank = max(1, min(in_dim, out_dim) // 2)
-            # If min(in_dim, out_dim) < 4, allow rank=1
-            return max(1, min(rank, max_rank))
+        # Initialize modalities if specified in config
+        if hasattr(config, 'modalities'):
+            self._init_modalities(config.modalities)
         
-        # Core components with proper dimension handling
-        # Input projection: [B, L, input_dim] -> [B, L, d_model, 2]
-        self.input_proj = ComplexLinear(
-            in_features=config.input_dim,
-            out_features=config.d_model,
-            factorized=config.factorized_linear,
-            kronecker_rank=valid_kronecker_rank(
-                config.kronecker_rank,
-                config.input_dim,
-                config.d_model
-            )
-        )
-        
-        # Output projection: [B, L, d_model, 2] -> [B, L, output_dim, 2]  
-        self.output_proj = ComplexLinear(
-            in_features=config.d_model,
-            out_features=config.output_dim,
-            factorized=config.factorized_linear,
-            kronecker_rank=valid_kronecker_rank(
-                config.kronecker_rank,
-                config.d_model,
-                config.output_dim
-            )
-        )
-        
-        # Initialize pos encoding and layers
-        self.pos_enc = PositionalEncoding(config.d_model)  # Takes d_model directly
-        self.layers = nn.ModuleList([
-            TransformerBlock(config) for _ in range(config.num_layers)
-        ])
-        
-        # Concept components with proper dimensions
+        # Initialize concept system
         self.concept_graph = ConceptGraph()
-        self.concept_projector = ComplexLinear(
-            in_features=config.d_model,
-            out_features=config.concept_dim,
-            factorized=config.factorized_linear,
-            kronecker_rank=valid_kronecker_rank(
-                config.kronecker_rank,
-                config.d_model,
-                config.concept_dim
-            )
-        )
+        self._init_concept_projector()
         
-        # Task routing components
+        # Initialize routing and plugin systems
         self.complexity_estimator = TaskComplexityEstimator(config)
         self.pos_enc_router = FeatureRouter(config)
-        
-        # Plugin system
         self.plugin_manager = PluginManager(config.plugin_dir)
         self.plugin_manager.discover()
         
-        # VM for proof verification
+        # Initialize VM
         self.vm = SillyVM()
+        self.proof_cache = {}
 
-        # Initialize image modality if specified
-        if hasattr(config, 'image_modality') and config.image_modality:
-            self.image_modality = ImageModality(
-                input_channels=config.image_modality['input_channels'],
-                output_dim=config.d_model,
-                input_size=config.image_modality.get('input_size', (32, 32)),
-                dropout_rate=config.image_modality.get('dropout_rate', 0.5)
+    def _init_core_components(self):
+        """Initialize the core transformer components"""
+        # Input projection handles both complex and real inputs
+        self.input_proj = ComplexLinear(
+            self.config.input_dim,
+            self.config.d_model,
+            factorized=self.config.factorized_linear,
+            kronecker_rank=self._valid_kronecker_rank(
+                self.config.kronecker_rank,
+                self.config.input_dim,
+                self.config.d_model
             )
-        else:
-            self.image_modality = None
+        )
+        
+        # Positional encoding
+        self.pos_enc = PositionalEncoding(self.config.d_model)
+        
+        # Transformer blocks
+        self.layers = nn.ModuleList([
+            TransformerBlock(self.config) 
+            for _ in range(self.config.num_layers)
+        ])
+        
+        # Output projection
+        self.output_proj = ComplexLinear(
+            self.config.d_model,
+            self.config.output_dim,
+            factorized=self.config.factorized_linear,
+            kronecker_rank=self._valid_kronecker_rank(
+                self.config.kronecker_rank,
+                self.config.d_model,
+                self.config.output_dim
+            )
+        )
 
-        # Initialize text modality if specified
-        if hasattr(config, 'text_modality') and config.text_modality:
+    def _init_modalities(self, modality_config):
+        """Initialize modality-specific components"""
+        # Image modality
+        if modality_config.get('image'):
+            self.image_encoder = ImageModality(
+                input_channels=modality_config['image'].get('input_channels', 3),
+                output_dim=self.config.d_model,
+                input_size=modality_config['image'].get('input_size', (224, 224)),
+                dropout_rate=modality_config['image'].get('dropout_rate', 0.1)
+            )
+            self.image_proj = ComplexLinear(
+                self.config.d_model,
+                self.config.d_model,
+                factorized=self.config.factorized_linear
+            )
+        
+        # Text modality
+        if modality_config.get('text'):
             self.text_tokenizer = Word2VecTokenizer(
-                w2v_path=config.text_modality['w2v_path'],
-                unk_token=config.text_modality.get('unk_token', '<UNK>'),
-                lowercase=config.text_modality.get('lowercase', True)
+                w2v_path=modality_config['text']['w2v_path'],
+                unk_token=modality_config['text'].get('unk_token', '<UNK>'),
+                pad_token=modality_config['text'].get('pad_token', '<PAD>'),
+                lowercase=modality_config['text'].get('lowercase', True),
+                device=self.config.device
             )
+            self.text_proj = ComplexLinear(
+                self.text_tokenizer.get_embedding_matrix().shape[1],
+                self.config.d_model,
+                factorized=self.config.factorized_linear
+            )
+
+    def _init_concept_projector(self):
+        """Initialize concept projection system"""
+        self.concept_projector = ComplexLinear(
+            self.config.d_model,
+            self.config.concept_dim,
+            factorized=self.config.factorized_linear,
+            kronecker_rank=self._valid_kronecker_rank(
+                self.config.kronecker_rank,
+                self.config.d_model,
+                self.config.concept_dim
+            )
+        )
+
+    def _valid_kronecker_rank(self, rank, in_dim, out_dim):
+        """Ensure valid Kronecker rank with safety checks"""
+        max_rank = min(in_dim, out_dim)
+        return min(max(1, rank), max(1, max_rank // 2))
+
+    def forward(
+        self,
+        inputs: Union[torch.Tensor, Dict[str, torch.Tensor], str, List[str]],
+        input_type: Optional[str] = None
+    ):
+        """
+        Unified forward pass handling:
+        - Raw tensors (auto-detected as image or text)
+        - Text strings
+        - Dictionary with {'text':..., 'image':...}
+        """
+        # Automatic input type detection
+        if input_type is None:
+            if isinstance(inputs, dict):
+                input_type = 'multimodal'
+            elif isinstance(inputs, str) or (isinstance(inputs, list) and isinstance(inputs[0], str)):
+                input_type = 'text'
+            elif inputs.dim() == 4:  # Image tensor [B,C,H,W]
+                input_type = 'image'
+            else:
+                input_type = 'default'  # Use core processing
+
+        # Process based on detected type
+        if input_type == 'text':
+            return self._process_text(inputs)
+        elif input_type == 'image':
+            return self._process_image(inputs)
+        elif input_type == 'multimodal':
+            return self._process_multimodal(inputs)
         else:
-            self.text_tokenizer = None
+            return self._process_core(inputs)
+
+    def _process_core(self, x):
+        """Process through core transformer pipeline"""
+        x = self.input_proj(x)
+        x = self.pos_enc_router(x, self.pos_enc)
+        
+        for layer in self.layers:
+            x = layer(x)
+            
+        return self.output_proj(x)
+
+    def _process_text(self, text):
+        """Process text input through text modality pipeline"""
+        if not hasattr(self, 'text_tokenizer'):
+            raise ValueError("Text modality not initialized")
+            
+        # Handle both single string and batch
+        if isinstance(text, str):
+            text = [text]
+            
+        # Tokenize and embed
+        encoded = self.text_tokenizer.batch_encode(text)
+        text_emb = self.text_tokenizer.embed(encoded['input_ids'])
+        
+        # Project and process through core
+        x = self.text_proj(text_emb)
+        return self._process_core(x)
+
+    def _process_image(self, images):
+        """Process image input through vision pipeline"""
+        if not hasattr(self, 'image_encoder'):
+            raise ValueError("Image modality not initialized")
+            
+        # Extract features and project
+        img_features = self.image_encoder(images)
+        x = self.image_proj(img_features)
+        
+        # Process through core
+        return self._process_core(x)
+
+    def _process_multimodal(self, inputs):
+        """Fuse multiple modalities"""
+        # Process each modality
+        text_emb = self.text_proj(
+            self.text_tokenizer.embed(inputs['text'])
+        ) if 'text' in inputs else None
+        
+        img_emb = self.image_proj(
+            self.image_encoder(inputs['image'])
+        ) if 'image' in inputs else None
+        
+        # Fuse modalities
+        if text_emb is not None and img_emb is not None:
+            # Simple concatenation fusion (can be enhanced)
+            x = torch.cat([text_emb, img_emb], dim=-1)
+            x = self.fusion(x) if hasattr(self, 'fusion') else x
+        elif text_emb is not None:
+            x = text_emb
+        else:
+            x = img_emb
+            
+        return self._process_core(x)
 
     def _make_proj(self, in_dim: int, out_dim: int) -> nn.Module:
         return ComplexLinear(
@@ -123,24 +232,6 @@ class SillyAI(nn.Module):
             factorized=self.config.factorized_linear,
             kronecker_rank=self.config.kronecker_rank
         )
-    
-    def _forward_core(self, x):
-        # Project input
-        x = self.input_proj(x)
-        
-        # Route through positional encoding
-        x = self.pos_enc_router(x, self.pos_enc)
-        
-        # Pass through transformer layers
-        for layer in self.layers:
-            x = layer(x)
-            
-        return x
-
-    def forward(self, x):
-        """Forward pass with input shape [B, L, D, 2]"""
-        out = self._forward_core(x)
-        return self.output_proj(out)
 
     def get_concept_projections(self, x: torch.Tensor) -> torch.Tensor:
         """Project input features onto concept space.
