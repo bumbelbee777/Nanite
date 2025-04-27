@@ -1,6 +1,5 @@
 import os
 import gzip
-import json
 import logging
 from datetime import datetime
 from typing import Optional, List, Union, Dict
@@ -295,7 +294,7 @@ class SillyAI(nn.Module):
         """Solve a problem by generating and verifying a proof."""
         # Generate proof if not provided
         if proof_path is None:
-            proof_code = self._generate_proof(problem)
+            proof_code = self._generate_proof_with_text_tokenizer(problem)
             return self._verify_proof_code(proof_code)
         return self._verify_proof(proof_path)
             
@@ -315,11 +314,99 @@ class SillyAI(nn.Module):
         except Exception as e:
             logger.error(f"Proof verification failed: {e}")
             return False
-            
-    def _generate_proof(self, problem: str) -> str:
-        """Generate proof code for a given problem."""
-        # TODO: Implement proof generation
-        raise NotImplementedError
+
+    def parse_problem(self, problem: str) -> Optional[Dict]:
+        """Parse a problem statement into the concept graph."""
+        # Example: Simple rule-based parsing for arithmetic problems
+        if "sum of" in problem and "greater than" in problem:
+            root = self.add_concept("SumGreaterThan")
+            self.add_relationship(root, "a", {"value": 3})
+            self.add_relationship(root, "b", {"value": 4})
+            self.add_relationship(root, "c", {"value": 5})
+            return root
+        else:
+            # Return None for unsupported problems
+            return None
+
+    def parse_problem_with_text_tokenizer(self, problem: str) -> Optional[Dict]:
+        """Parse a problem statement into the concept graph using the text tokenizer."""
+        if not hasattr(self, 'text_tokenizer'):
+            raise ValueError("Text modality not initialized")
+
+        # Tokenize and embed the problem statement
+        tokens = self.text_tokenizer.tokenize(problem)
+        embeddings = self.text_tokenizer.embed(tokens)
+
+        # Example: Use embeddings to identify key concepts and relationships
+        root = self.concept_graph.add_concept("ParsedProblem")
+        for token, embedding in zip(tokens, embeddings):
+            # Add each token as a concept and link it to the root
+            concept = self.concept_graph.add_concept(token, metadata={"embedding": embedding})
+            self.concept_graph.add_relationship(root, concept, {"type": "contains"})
+
+        return root
+
+    def _generate_proof_with_text_tokenizer(self, problem: str) -> str:
+        """Generate proof code for a given problem using the text tokenizer and concept graph."""
+        used_registers = set()
+        proof_code = ".Proof() {\n"
+
+        # Step 1: Parse the problem into the concept graph using the text tokenizer
+        root_concept = self.parse_problem_with_text_tokenizer(problem)
+        if not root_concept:
+            proof_code += "    ASSERT false  // Unable to parse problem\n"
+            proof_code += "    HLT\n"
+            proof_code += "}\n"
+            return proof_code
+
+        # Step 2: Identify the relevant subgraph
+        relevant_subgraph = self.concept_graph.get_relevant_subgraph(root_concept)
+        if not relevant_subgraph:
+            proof_code += "    ASSERT false  // No relevant subgraph found\n"
+            proof_code += "    HLT\n"
+            proof_code += "}\n"
+            return proof_code
+
+        # Step 3: Walk the subgraph and generate bytecode
+        for node in relevant_subgraph.walk():
+            operation = node.get("operation")
+            operands = node.get("operands", [])
+            target = node.get("target")
+            comment = node.get("comment", "")
+
+            # Allocate registers for operands and target
+            operand_registers = [self._allocate_register(used_registers) for _ in operands]
+            target_register = self._allocate_register(used_registers)
+
+            # Generate bytecode for the operation
+            if operation == "assign":
+                proof_code += f"    {target_register} = {operands[0]}  // {comment}\n"
+            elif operation == "add":
+                proof_code += f"    {target_register} = ADD {operand_registers[0]}, {operand_registers[1]}  // {comment}\n"
+            elif operation == "compare":
+                proof_code += f"    CJM {operand_registers[0]} {node['operator']} {operand_registers[1]}, Fail()  // {comment}\n"
+            # Add more operations as needed
+
+        # Step 4: Add success and failure handlers
+        proof_code += "    ASSERT true  // Proof holds\n"
+        proof_code += "    HLT\n"
+        proof_code += "}\n\n"
+        proof_code += ".Fail() {\n"
+        proof_code += "    ASSERT false  // Proof failed\n"
+        proof_code += "    HLT\n"
+        proof_code += "}\n"
+
+        return proof_code
+
+    def _allocate_register(self, used_registers: set, register_type: str = 'R') -> str:
+        """Allocate a new register of the specified type that is not in use."""
+        reg_index = 0
+        while True:
+            reg = f"{register_type}{reg_index}"
+            if reg not in used_registers:
+                used_registers.add(reg)
+                return reg
+            reg_index += 1
 
     def save_snapshot(self, loss, epoch=None, compress=True):
         """Save model snapshot with metadata."""
@@ -397,3 +484,77 @@ class SillyAI(nn.Module):
         token_indices = self.text_tokenizer.encode(text)
         embeddings = self.text_tokenizer.embed_indices(token_indices)
         return torch.tensor(embeddings, dtype=torch.float32).unsqueeze(0)
+
+    def generate_response(self, prompt: Union[str, Dict[str, torch.Tensor]]) -> str:
+        """
+        Generate a human-like response based on the input prompt.
+        
+        Args:
+            prompt: Input text, image, or multimodal data.
+        
+        Returns:
+            A human-like response as a string.
+        """
+        # Step 1: Detect input type and preprocess
+        if isinstance(prompt, str):
+            input_type = 'text'
+            processed_input = self._process_text(prompt)
+        elif isinstance(prompt, dict) and 'image' in prompt:
+            input_type = 'multimodal'
+            processed_input = self._process_multimodal(prompt)
+        else:
+            raise ValueError("Unsupported input type. Provide text or multimodal input.")
+
+        # Step 2: Perform reasoning if needed
+        reasoning_result = None
+        if input_type == 'text' and "why" in prompt.lower():
+            # Example: Use SillyISA for reasoning if the prompt is a question
+            problem_statement = f"Explain: {prompt}"
+            try:
+                reasoning_result = self.solve_problem(problem_statement)
+            except NotImplementedError:
+                reasoning_result = "Reasoning not implemented yet."
+
+        # Step 3: Generate response candidates
+        response_candidates = []
+        if input_type == 'text':
+            response_candidates.append(f"Processed text: {prompt[::-1]}")  # Example placeholder
+        if reasoning_result:
+            response_candidates.append(f"Reasoning result: {reasoning_result}")
+        if hasattr(self, 'concept_graph'):
+            related_concepts = list(self.concept_graph.concepts.keys())[:3]  # Example: top 3 concepts
+            response_candidates.append(f"Related concepts: {', '.join(related_concepts)}")
+
+        # Step 4: Reflect and select the best response
+        best_response = max(response_candidates, key=len)  # Example: pick the longest response
+
+        return best_response
+
+    def describe_image(self, image_path: str) -> str:
+        """
+        Generate a textual description of an image.
+
+        Args:
+            image_path: Path to the image file.
+
+        Returns:
+            A textual description of the image.
+        """
+        if not hasattr(self, 'image_encoder'):
+            raise ValueError("Image modality is not initialized")
+
+        # Load and process the image
+        image_tensor = ImageModality.load_and_process_image(
+            image_path, self.config.modalities['image'].get('input_size', (224, 224))
+        )
+
+        # Encode the image
+        image_features = self.image_encoder(image_tensor)
+
+        # Project the features through the core pipeline
+        processed_features = self._process_core(self.image_proj(image_features))
+
+        # Generate a description (placeholder logic for now)
+        description = f"This image contains features with mean value {processed_features.mean().item():.2f}."
+
+        return description
