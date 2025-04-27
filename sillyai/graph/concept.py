@@ -78,6 +78,9 @@ class Concept:
             f"connections=[{conns}])"
         )
 
+    def add_connection(self, target: str, weight: float, relationship: str) -> None:
+        self.connections.append(Connection(target, weight, relationship))
+
 
 class ReasoningStep:
     def __init__(
@@ -112,126 +115,92 @@ class GraphRegion:
 
 
 class ConceptGraph:
-    def __init__(self, decay_rate: float = 0.45, debug: bool = False):
-        self.concepts: Dict[str, Concept] = {}
+    def __init__(self, decay_rate=0.9):
+        self.concepts = {}
         self.decay_rate = decay_rate
-        self.time = 0
-        self.debug = debug
-        if self.debug:
-            logger.setLevel(logging.DEBUG)
-        else:
-            logger.setLevel(logging.INFO)
+        self._time = 0
 
-        # new containers
-        self.regions: Dict[str, GraphRegion] = {}
-
-    # ----------------------------
-    # Legacy API (unchanged)
-    # ----------------------------
-    def add_concept(self, name: str) -> None:
+    def add_concept(self, name):
         if name not in self.concepts:
             self.concepts[name] = Concept(name)
-            logger.debug(f"Added concept: {name}")
 
-    def add_connection(
-        self,
-        source: str,
-        target: str,
-        weight: float = 1.0,
-        relationship: str = "co-occurrence",
-        confidence: float = 1.0
-    ) -> None:
-        self.add_concept(source)
-        self.add_concept(target)
-        conn = Connection(target, weight, relationship, confidence)
-        self.concepts[source].connections.append(conn)
-        # add reciprocal
-        self.concepts[target].connections.append(
-            Connection(source, weight, relationship, confidence)
-        )
-        logger.debug(f"Connected {source} <-> {target} "
-                     f"weight={weight}, relationship={relationship}, confidence={confidence}")
+    def add_connection(self, source, target, weight=1.0, relationship="co-occurrence"):
+        if source not in self.concepts or target not in self.concepts:
+            return
 
-    async def _propagate_energy(self, transfer_factor: float = 0.1) -> None:
-        new_energy = defaultdict(float)
-        for concept in list(self.concepts.values()):
-            for conn in concept.connections:
-                transferred = concept.energy * conn.weight * transfer_factor
-                new_energy[conn.target] += transferred
-                new_energy[concept.name] -= transferred
-        for name, delta in new_energy.items():
-            if name in self.concepts:
-                c = self.concepts[name]
-                old = c.energy
-                c.energy = max(0.0, old + delta)
-                self._update_access(name)
-                logger.debug(f"Energy update {name}: {old:.3f} -> {c.energy:.3f}")
-                await asyncio.sleep(0)
+        # Add bidirectional connections
+        self.concepts[source].add_connection(target, weight, relationship)
+        self.concepts[target].add_connection(source, weight, relationship)
 
-    def propagate_energy(self, transfer_factor: float = 0.1) -> None:
-        logger.info("Starting energy propagation...")
-        try:
-            asyncio.run(self._propagate_energy(transfer_factor))
-        except RuntimeError:
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(self._propagate_energy(transfer_factor))
-        logger.info("Energy propagation complete.")
+    def propagate_energy(self):
+        """Propagate energy through concept graph with proper distribution."""
+        # Save initial energies and prepare new energy state
+        initial_energies = {name: concept.energy for name, concept in self.concepts.items()}
+        new_energies = {name: 0.0 for name in self.concepts}
 
-    async def _update_n_cluster(
-        self,
-        min_energy: float = 0.01,
-        purge_threshold: int = 5
-    ) -> None:
+        # First pass: calculate energy distribution
+        for name, concept in self.concepts.items():
+            current_energy = initial_energies[name]
+            if current_energy <= 0:
+                continue
+
+            # Calculate retained vs propagated energy
+            retained = current_energy * self.decay_rate
+            new_energies[name] += retained
+            
+            # Calculate propagation energy
+            propagate_energy = current_energy * (1 - self.decay_rate)
+            if not concept.connections:
+                new_energies[name] += propagate_energy  # Keep remaining energy if no connections
+                continue
+
+            # Normalize connection weights for fair distribution
+            total_weight = sum(conn.weight for conn in concept.connections)
+            if total_weight > 0:
+                for conn in concept.connections:
+                    target = conn.target
+                    if target in self.concepts:  # Ensure target exists
+                        # Calculate energy share based on connection weight
+                        energy_share = propagate_energy * (conn.weight / total_weight)
+                        new_energies[target] += energy_share
+
+        # Update all concept energies with new values
+        for name, energy in new_energies.items():
+            self.concepts[name].energy = energy
+
+        logger.debug(f"Energy propagation complete. New energies: {new_energies}")
+
+    def update_n_cluster(self, min_energy=0.1, purge_threshold=10):
+        """Update concept cluster, removing low energy/access concepts."""
         to_remove = []
-        for name, concept in list(self.concepts.items()):
-            old_e = concept.energy
-            concept.energy *= self.decay_rate
-            if concept.energy < min_energy:
+        for name, concept in self.concepts.items():
+            if concept.energy < min_energy and concept.access_count < purge_threshold:
                 to_remove.append(name)
-            logger.debug(f"Decayed {name}: {old_e:.3f} -> {concept.energy:.3f}")
-            await asyncio.sleep(0)
 
         for name in to_remove:
-            self._purge_concept(name)
+            self._remove_concept(name)
 
-        heap = [(c.energy, c.access_count, c.name)
-                for c in self.concepts.values()]
-        heapq.heapify(heap)
-        while len(self.concepts) > purge_threshold:
-            e, cnt, nm = heapq.heappop(heap)
-            if nm in self.concepts:
-                logger.debug(f"LFU purge: {nm} (e={e:.3f}, count={cnt})")
-                self._purge_concept(nm)
-            await asyncio.sleep(0)
+    def _remove_concept(self, name):
+        """Remove a concept and its connections."""
+        if name not in self.concepts:
+            return
 
-    def update_n_cluster(
-        self,
-        min_energy: float = 0.01,
-        purge_threshold: int = 5
-    ) -> None:
-        logger.info("Starting cluster update...")
-        try:
-            asyncio.run(self._update_n_cluster(min_energy, purge_threshold))
-        except RuntimeError:
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(
-                self._update_n_cluster(min_energy, purge_threshold)
-            )
-        logger.info("Cluster update complete.")
+        # Remove connections to this concept from others
+        concept = self.concepts[name]
+        for conn in concept.connections:
+            other = self.concepts.get(conn.target)
+            if other:
+                other.connections = [c for c in other.connections if c.target != name]
 
-    def _update_access(self, concept_name: str) -> None:
-        c = self.concepts[concept_name]
-        c.access_count += 1
-        c.last_access_time = self.time
-        self.time += 1
-        logger.debug(f"Access {concept_name}: count={c.access_count}, time={c.last_access_time}")
+        # Remove the concept itself
+        del self.concepts[name]
 
-    def _purge_concept(self, name: str) -> None:
+    def _update_access(self, name):
+        """Update access count and time for a concept."""
         if name in self.concepts:
-            del self.concepts[name]
-            for c in self.concepts.values():
-                c.connections = [x for x in c.connections if x.target != name]
-            logger.debug(f"Purged concept: {name}")
+            self.concepts[name].access_count += 1
+            self.concepts[name].last_access_time = self._time
+            self._time += 1
 
     def __str__(self) -> str:
         lines = []
@@ -243,7 +212,6 @@ class ConceptGraph:
 
     def __repr__(self) -> str:
         return self.__str__()
-
 
     # ----------------------------
     # NEW API
@@ -269,7 +237,7 @@ class ConceptGraph:
                 c.embedding = alpha * c.embedding + (1 - alpha) * embedding.detach()
 
     def get_concepts_by_token(self, token_id: int) -> List[str]:
-        return [n for n, c in self.concepts.items() if token_id in c.token_ids]
+        return [name for name, concept in self.concepts.items() if token_id in concept.token_ids]
 
     # --- 2. Tags & Metadata ---
     def tag_concept(self, name: str, tag: str) -> None:

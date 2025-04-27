@@ -1,0 +1,1 @@
+"""Vision and image processing components."""

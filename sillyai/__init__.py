@@ -1,5 +1,6 @@
-from .ai import SillyAI
-from .concept import ConceptGraph
-from .tokenizer import Word2VecTokenizer
-from .plugin import SillyPlugin, PluginManager
-from .vm import SillyVM
+from .api import SillyAI
+from .core.config import ModelConfig
+from .graph.concept import ConceptGraph
+from .modalities.text.tokenizer import Word2VecTokenizer
+from .plugins.plugin import SillyPlugin, PluginManager
+from .core.vm import SillyVM

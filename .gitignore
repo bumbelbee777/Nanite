@@ -5,3 +5,4 @@ __pycache__/
 sillyai.egg-info/
 snapshots/
 sillyai.egg-info/SOURCES.txt
+.pytest_cache/

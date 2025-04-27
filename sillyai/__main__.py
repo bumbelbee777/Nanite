@@ -1,6 +1,6 @@
 import os
 import argparse
-from sillyai.ai import SillyAI, ModelConfig
+from sillyai.api import SillyAI, ModelConfig
 
 def main():
     # Parse command line arguments
@@ -24,12 +24,10 @@ def main():
         dim_ff=128,         # Feed-forward dimension
         
         # Optional parameters with defaults
-        real_mode=False,
-        dynamic_mode=True,
         factorized_linear=False,
-        kronecker_rank=4,
+        kronecker_rank=3,
         optim_args={
-            'use_toeplitz': False,
+            'use_toeplitz': True,
             'factorized_linear': False,
             'mixed_precision': True
         }

@@ -43,6 +43,7 @@ class PluginManager:
     def __init__(self, plugin_dir: str):
         self.plugin_dir = plugin_dir
         self.plugins: list[SillyPlugin] = []
+        self.active_plugins = {}  # Dictionary to track active plugins
 
     def discover(self):
         """Dynamically import all .py files in plugin_dir that define SillyPlugin subclasses."""

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 # Initialize concept graph
 
 def get_concept_graph():
-    from sillyai.concept import ConceptGraph
+    from sillyai.graph.concept import ConceptGraph
     return ConceptGraph()
 
 TypeName = str  # e.g. 'i8', 'u128', 'f32', 'f128', 'Prop', 'Conc', 'Vec3<f32>'
@@ -95,6 +95,7 @@ class SillyVM:
         self.symbolic = SymbolicEvaluator()
         self.type_registry = {}
         self.variables = {}  # Maps variable names to registers
+        self.proof_success: bool = True  # Track if proof succeeded
 
     def parse(self, asm: str) -> None:
         lines = asm.splitlines()
@@ -142,7 +143,6 @@ class SillyVM:
                     
             elif clean == '}':
                 current_routine = None
-                self.variables.clear()  # Clear variables at routine end
                 continue
                 
             elif clean.endswith(':'):
@@ -168,11 +168,11 @@ class SillyVM:
                     code_lines.append(f"CALL {call_name}")
                     continue
                 
-                # Handle variable references in expressions
+                # Handle variable references in expressions and comparisons
                 if current_routine:
                     # Replace variable names with their registers
                     for var_name, (reg, _) in self.variables.items():
-                        clean = re.sub(r'\b' + var_name + r'\b', reg, clean)
+                        clean = re.sub(r'\b' + re.escape(var_name) + r'\b', reg, clean)
                 
                 code_lines.append(clean)
         
@@ -312,6 +312,12 @@ class SillyVM:
                 
         except FileNotFoundError:
             raise FileNotFoundError(f"Bytecode file not found: {filepath}")
+
+    def execute(self) -> bool:
+        """Execute the loaded code and return True if proof succeeds."""
+        self.proof_success = True  # Reset proof status
+        self.run()  # Run the code
+        return self.proof_success
 
     # Opcode Handlers
     def op_nop(self, args: List[str]) -> None:
@@ -457,6 +463,7 @@ class SillyVM:
     def op_assert(self, args: List[str]) -> None:
         tv = self.get_typed(args[0])
         if not bool(tv.value):
+            self.proof_success = False  # Mark proof as failed
             raise AssertionError("ASSERT failed")
 
     def op_jm(self, args: List[str]) -> None:
@@ -519,9 +526,11 @@ class SillyVM:
         self.set_reg(dest, TypedValue('bool', (not v1.value) or v2.value))
 
     def op_iff(self, args: List[str]) -> None:
-        v1 = self.get_typed(args[0])
-        v2 = self.get_typed(args[1])
-        dest = args[2]
+        v1_name, v2_name, dest = args
+        # Handle variable references by getting their actual values
+        v1 = self.get_typed(v1_name)
+        v2 = self.get_typed(v2_name)
+        # Compare the actual values and store result
         self.set_reg(dest, TypedValue('bool', v1.value == v2.value))
 
     def op_forall(self, args: List[str]) -> None:

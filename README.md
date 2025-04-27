@@ -1,8 +1,8 @@
-# SillyAI - The next step towards AGI?
+# SillyAI
 
-SillyAI is an advanced, complex-valued transformer model that also supports traditional real-valued operation if desired. This flexibility allows it to adapt to a wide range of tasks across various domains, from signal processing to quantum physics simulations. SillyAI introduces innovative features like concept graphing, enabling it to visualize and understand the relationships between concepts with a weighting mechanism based on energy values. This graph dynamically updates through an LFU algorithm, thereby improving its reasoning capabilities over time.
+SillyAI is an advanced, complex-valued transformer model that leverages the power of complex numbers for deep learning. By operating natively in complex space, SillyAI can capture richer patterns and relationships that are often missed by traditional real-valued models. The complex-valued architecture enables it to encode both magnitude and phase information, making it particularly well-suited for tasks involving signal processing, quantum physics simulations, and other domains where phase relationships are important.
 
-In addition to its conceptual graphing, SillyAI leverages the power of complex numbers to represent data. By encoding both magnitude and phase in the model's operations, SillyAI captures richer patterns and relationships that are often overlooked by traditional AI models that only rely on real numbers. It also leverages mathematical properties of this number system to perform more efficiently and better.
+SillyAI introduces innovative features like concept graphing, enabling it to visualize and understand the relationships between concepts with a weighting mechanism based on energy values. This graph dynamically updates through an LFU algorithm, thereby improving its reasoning capabilities over time.
 
 To allow for more efficient and optimized reasoning and problem-solving, SillyAI uses the SILLY custom ISA to build high-level assembler corresponding to proofs or in general, steps to solving problems in a reliable manner.
 

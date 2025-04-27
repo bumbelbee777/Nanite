@@ -1,0 +1,1 @@
+"""Core components of SillyAI including transformer, VM, and complex operations."""
