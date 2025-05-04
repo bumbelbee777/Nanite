@@ -5,8 +5,13 @@ from collections import defaultdict, deque
 import heapq
 import math
 from typing import Optional, List, Dict, Set, Tuple, Any
+
 import torch
 import torch.functional as F
+import torch.nn as nn
+
+from sillyai.core.config import ModelConfig
+from sillyai.core.complex.linear import ComplexLinear
 
 # Configure module-level logger
 logger = logging.getLogger(__name__)
@@ -36,7 +41,6 @@ class Connection:
             f"relationship={self.relationship!r}, confidence={self.confidence:.3f})"
         )
 
-
 class Concept:
     def __init__(
         self,
@@ -52,7 +56,6 @@ class Concept:
         self.access_count = 0
         self.last_access_time = 0
 
-        # --- NEW FIELDS ---
         # for token/vector association
         self.token_ids: Set[int] = set()
         self.embedding: Optional[torch.Tensor] = None
@@ -81,7 +84,6 @@ class Concept:
     def add_connection(self, target: str, weight: float, relationship: str) -> None:
         self.connections.append(Connection(target, weight, relationship))
 
-
 class ReasoningStep:
     def __init__(
         self,
@@ -103,7 +105,6 @@ class ReasoningStep:
             + (f" {{{self.justification}}}" if self.justification else "")
         )
 
-
 class GraphRegion:
     def __init__(self, name: str, purpose: Optional[str] = None):
         self.name = name
@@ -113,24 +114,212 @@ class GraphRegion:
     def __repr__(self):
         return f"GraphRegion(name={self.name!r}, purpose={self.purpose!r}, size={len(self.concepts)})"
 
-
 class ConceptGraph:
-    def __init__(self, decay_rate=0.9):
+    def __init__(self):
         self.concepts = {}
-        self.decay_rate = decay_rate
+        self.connections = {}
+        self._module = None
         self._time = 0
+        self.decay_rate = 0.1
 
-    def add_concept(self, name):
+    def __getstate__(self):
+        """Return state for pickling"""
+        state = self.__dict__.copy()
+        # Remove the module since it's not picklable
+        state['_module'] = None
+        return state
+
+    def __setstate__(self, state):
+        """Set state during unpickling"""
+        self.__dict__.update(state)
+        # Reinitialize any non-picklable attributes
+        self._module = None
+
+    def add_concept(self, name: str, metadata: Optional[Dict] = None) -> str:
+        """Add a concept to the graph"""
         if name not in self.concepts:
-            self.concepts[name] = Concept(name)
+            self.concepts[name] = Concept(name, metadata)
+            self.connections[name] = []
+        return name
 
-    def add_connection(self, source, target, weight=1.0, relationship="co-occurrence"):
+    def add_relationship(self, source: str, target: str, metadata: Optional[Dict] = None) -> None:
+        """Add a relationship between concepts"""
         if source not in self.concepts or target not in self.concepts:
-            return
+            raise ValueError("Both source and target concepts must exist")
+        
+        connection = Connection(target, metadata=metadata)
+        self.connections[source].append(connection)
 
-        # Add bidirectional connections
-        self.concepts[source].add_connection(target, weight, relationship)
-        self.concepts[target].add_connection(source, weight, relationship)
+    def get_concept(self, name: str) -> Optional[Concept]:
+        """Get a concept by name"""
+        return self.concepts.get(name)
+
+    def get_connections(self, concept: str) -> List[Connection]:
+        """Get all connections from a concept"""
+        return self.connections.get(concept, [])
+
+    def remove_concept(self, name: str) -> None:
+        """Remove a concept and its connections"""
+        if name in self.concepts:
+            del self.concepts[name]
+            del self.connections[name]
+            # Remove connections to this concept
+            for connections in self.connections.values():
+                connections[:] = [c for c in connections if c.target != name]
+
+    def update_concept(self, name: str, metadata: Dict) -> None:
+        """Update concept metadata"""
+        if name in self.concepts:
+            self.concepts[name].metadata.update(metadata)
+
+    def update_relationship(self, source: str, target: str, metadata: Dict) -> None:
+        """Update relationship metadata"""
+        if source in self.connections:
+            for conn in self.connections[source]:
+                if conn.target == target:
+                    conn.metadata.update(metadata)
+                    break
+
+    def get_related_concepts(self, concept: str, max_depth: int = 1) -> Set[str]:
+        """Get related concepts up to max_depth"""
+        if concept not in self.concepts:
+            return set()
+            
+        related = set()
+        queue = [(concept, 0)]
+        visited = {concept}
+        
+        while queue:
+            current, depth = queue.pop(0)
+            if depth < max_depth:
+                for conn in self.connections[current]:
+                    if conn.target not in visited:
+                        visited.add(conn.target)
+                        related.add(conn.target)
+                        queue.append((conn.target, depth + 1))
+                        
+        return related
+
+    def get_concept_path(self, start: str, end: str) -> Optional[List[str]]:
+        """Find shortest path between concepts"""
+        if start not in self.concepts or end not in self.concepts:
+            return None
+            
+        queue = [(start, [start])]
+        visited = {start}
+        
+        while queue:
+            current, path = queue.pop(0)
+            for conn in self.connections[current]:
+                if conn.target == end:
+                    return path + [end]
+                if conn.target not in visited:
+                    visited.add(conn.target)
+                    queue.append((conn.target, path + [conn.target]))
+                    
+        return None
+
+    def get_concept_subgraph(self, concepts: Set[str]) -> "ConceptGraph":
+        """Extract subgraph containing only specified concepts"""
+        subgraph = ConceptGraph()
+        
+        # Copy concepts
+        for name in concepts:
+            if name in self.concepts:
+                subgraph.concepts[name] = self.concepts[name]
+                
+        # Copy relevant connections
+        for name in concepts:
+            if name in self.connections:
+                subgraph.connections[name] = [
+                    conn for conn in self.connections[name]
+                    if conn.target in concepts
+                ]
+                
+        return subgraph
+
+    def merge_graphs(self, other: "ConceptGraph") -> None:
+        """Merge another graph into this one"""
+        # Merge concepts
+        for name, concept in other.concepts.items():
+            if name not in self.concepts:
+                self.concepts[name] = concept
+            else:
+                # Update existing concept
+                self.concepts[name].metadata.update(concept.metadata)
+                
+        # Merge connections
+        for name, connections in other.connections.items():
+            if name not in self.connections:
+                self.connections[name] = connections
+            else:
+                # Add new connections
+                existing_targets = {conn.target for conn in self.connections[name]}
+                for conn in connections:
+                    if conn.target not in existing_targets:
+                        self.connections[name].append(conn)
+
+    def compute_concept_similarity(self, concept1: str, concept2: str) -> float:
+        """Compute similarity between two concepts"""
+        if concept1 not in self.concepts or concept2 not in self.concepts:
+            return 0.0
+            
+        # Get sets of related concepts
+        related1 = self.get_related_concepts(concept1)
+        related2 = self.get_related_concepts(concept2)
+        
+        # Compute Jaccard similarity
+        intersection = len(related1.intersection(related2))
+        union = len(related1.union(related2))
+        
+        return intersection / union if union > 0 else 0.0
+
+    def get_concept_clusters(self, threshold: float = 0.5) -> List[Set[str]]:
+        """Cluster concepts based on similarity"""
+        clusters = []
+        unclustered = set(self.concepts.keys())
+        
+        while unclustered:
+            # Start new cluster with first unclustered concept
+            current = unclustered.pop()
+            cluster = {current}
+            
+            # Find similar concepts
+            for concept in list(unclustered):
+                if self.compute_concept_similarity(current, concept) >= threshold:
+                    cluster.add(concept)
+                    unclustered.remove(concept)
+                    
+            clusters.append(cluster)
+            
+        return clusters
+
+    def prune_weak_connections(self, threshold: float = 0.1) -> None:
+        """Remove connections with low weights"""
+        for name in self.connections:
+            self.connections[name] = [
+                conn for conn in self.connections[name]
+                if conn.weight >= threshold
+            ]
+
+    def get_central_concepts(self, top_k: int = 5) -> List[Tuple[str, float]]:
+        """Get most central concepts based on connection count"""
+        centrality = {}
+        for name in self.concepts:
+            # Outgoing connections
+            out_degree = len(self.connections[name])
+            # Incoming connections
+            in_degree = sum(
+                1 for conns in self.connections.values()
+                for conn in conns if conn.target == name
+            )
+            centrality[name] = out_degree + in_degree
+            
+        return sorted(
+            centrality.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:top_k]
 
     def propagate_energy(self):
         """Propagate energy through concept graph with proper distribution."""
@@ -213,11 +402,6 @@ class ConceptGraph:
     def __repr__(self) -> str:
         return self.__str__()
 
-    # ----------------------------
-    # NEW API
-    # ----------------------------
-
-    # --- 1. Token/Vector Association ---
     def associate_token(
         self,
         concept_name: str,
@@ -239,7 +423,6 @@ class ConceptGraph:
     def get_concepts_by_token(self, token_id: int) -> List[str]:
         return [name for name, concept in self.concepts.items() if token_id in concept.token_ids]
 
-    # --- 2. Tags & Metadata ---
     def tag_concept(self, name: str, tag: str) -> None:
         if name in self.concepts:
             self.concepts[name].tags.add(tag)
@@ -248,7 +431,6 @@ class ConceptGraph:
         if name in self.concepts:
             self.concepts[name].description = description
 
-    # --- 3. Regions/Subgraphs ---
     def define_region(self, region_name: str, purpose: Optional[str] = None) -> None:
         if region_name not in self.regions:
             self.regions[region_name] = GraphRegion(region_name, purpose)
@@ -262,7 +444,6 @@ class ConceptGraph:
     def get_region(self, region_name: str) -> Optional[GraphRegion]:
         return self.regions.get(region_name)
 
-    # --- 4. Inference Chains & Pathfinding ---
     def find_paths(
         self,
         start: str,
@@ -326,7 +507,6 @@ class ConceptGraph:
                 break
         return steps
 
-    # --- 5. Entanglement & Shuffling ---
     def compute_entanglement(self) -> Dict[Tuple[str,str], float]:
         """Pairwise entanglement = cosine(sim) * co-activation freq."""
         ent = {}
@@ -350,7 +530,6 @@ class ConceptGraph:
         random.Random(key).shuffle(items)
         self.concepts = dict(items)
 
-    # --- 6. Relationship Queries ---
     def query_by_relationship(self, rel: str) -> List[Tuple[str,str]]:
         return [
             (c.name, conn.target)
@@ -358,3 +537,48 @@ class ConceptGraph:
             for conn in c.connections
             if conn.relationship == rel
         ]
+
+    def add_node(self, name: str, energy: float = 0.0) -> Concept:
+        if name in self.concepts:
+            raise ValueError(f"Node '{name}' already exists.")
+        concept = Concept(name=name, energy=energy)
+        self.concepts[name] = concept
+        return concept
+
+    def add_edge(self, source: str, target: str, weight: float = 1.0) -> Connection:
+        if source not in self.concepts or target not in self.concepts:
+            raise ValueError("Both source and target nodes must exist.")
+        connection = Connection(target=target, weight=weight)
+        self.connections[source].append(connection)
+        return connection
+
+    def get_node(self, name: str) -> Optional[Concept]:
+        return self.concepts.get(name)
+
+    def get_edge(self, source: str, target: str) -> Optional[Connection]:
+        if source in self.connections:
+            for connection in self.connections[source]:
+                if connection.target == target:
+                    return connection
+        return None
+
+class ConceptSystem(nn.Module):
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.config = config
+        self.concept_graph = ConceptGraph()
+        self.concept_projector = ComplexLinear(
+            self.config.d_model,
+            self.config.concept_dim,
+            factorized=self.config.factorized_linear,
+            kronecker_rank=self._valid_kronecker_rank(
+                self.config.kronecker_rank,
+                self.config.d_model,
+                self.config.concept_dim
+            )
+        )
+        
+    def get_concept_projections(self, x):
+        concept_feats = self.concept_projector(x)
+        norms = torch.norm(concept_feats, dim=-1, keepdim=True)
+        return concept_feats / (norms + 1e-8)
