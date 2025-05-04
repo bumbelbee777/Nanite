@@ -10,8 +10,8 @@ import torch
 import torch.functional as F
 import torch.nn as nn
 
-from sillyai.core.config import ModelConfig
-from sillyai.core.complex.linear import ComplexLinear
+from .config import ModelConfig
+from .core import LinearLayer
 
 # Configure module-level logger
 logger = logging.getLogger(__name__)
@@ -567,7 +567,7 @@ class ConceptSystem(nn.Module):
         super().__init__()
         self.config = config
         self.concept_graph = ConceptGraph()
-        self.concept_projector = ComplexLinear(
+        self.concept_projector = LinearLayer(
             self.config.d_model,
             self.config.concept_dim,
             factorized=self.config.factorized_linear,

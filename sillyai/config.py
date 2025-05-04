@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from .ops import PrecisionLevel
+
 @dataclass
 class ModelConfig:
     dim:               int
