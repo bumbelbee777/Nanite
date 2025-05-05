@@ -1,272 +1,240 @@
-import re
-import math
-from gensim.models import KeyedVectors
-from typing import List, Dict, Optional, Union
-from pathlib import Path
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Tuple, Optional, Union
-from PIL import Image
-import torchvision.transforms as transforms
-
+from typing import Dict, List, Tuple, Optional, Union, Any
+import numpy as np
+from pathlib import Path
 from .config import ModelConfig
+from gensim.models import KeyedVectors
 from .core import LinearLayer
+import re
+
+from .ops import MultivectorOps, tensor_to_multivector
 
 class ImageModality(nn.Module):
     def __init__(
         self,
+        ops: MultivectorOps,
         input_channels: int = 3,
         output_dim: int = 256,
-        input_size: Optional[Union[int, Tuple[int, int]]] = None,
-        dropout_rate: float = 0.3,
+        channels: List[int] = [64, 128, 256, 512],
+        kernel_sizes: Optional[List[int]] = None,
+        pool_type: str = "adaptive",            # "adaptive" | "max" | "none"
+        pool_size: Tuple[int,int] = (4,4),       # for adaptive
+        dropout: float = 0.3,
+        activation: str = "gelu",
         use_batchnorm: bool = True,
-        activation: str = 'gelu',
-        adaptive_pooling: bool = True,
         min_resolution: int = 32
     ):
-        """
-        Args:
-            input_size: Optional (height, width). If None, will adapt to input.
-                       If int, will use (size, size). Can be overridden during forward pass.
-            adaptive_pooling: If True, uses adaptive pooling to handle varying resolutions
-            min_resolution: Minimum resolution for safety checks
-        """
         super().__init__()
+        assert pool_type in ("adaptive","max","none")
+        
+        self.ops            = ops
         self.input_channels = input_channels
-        self.output_dim = output_dim
-        self.adaptive_pooling = adaptive_pooling
+        self.output_dim     = output_dim
+        self.channels       = channels
+        self.kernel_sizes   = kernel_sizes or [3]*len(channels)
+        self.pool_type      = pool_type
+        self.pool_size      = pool_size
+        self.use_bn         = use_batchnorm
         self.min_resolution = min_resolution
         
-        # Set default/initial input size
-        self.input_size = self._validate_input_size(input_size) if input_size else None
+        # Build conv params for each block
+        self.convs = nn.ModuleList()
+        in_c = input_channels
+        for out_c, k in zip(channels, self.kernel_sizes):
+            conv = nn.ModuleDict({
+                "weight": nn.Parameter(torch.randn(out_c, in_c, k, k, dtype=torch.complex64)*0.02),
+                "bias":   nn.Parameter(torch.zeros(out_c, dtype=torch.complex64)),
+                # real & imag BatchNorm
+                "bn_real": nn.BatchNorm2d(out_c) if use_batchnorm else None,
+                "bn_imag": nn.BatchNorm2d(out_c) if use_batchnorm else None,
+                "act":     getattr(nn, activation.title())() if hasattr(nn, activation.title()) else nn.GELU(),
+            })
+            self.convs.append(conv)
+            in_c = out_c
         
-        # Core CNN architecture
-        self.conv_blocks = nn.Sequential(
-            self._conv_block(input_channels, 64, 3),
-            self._conv_block(64, 128, 3),
-            self._conv_block(128, 256, 3),
-            self._conv_block(256, 512, 3)
-        )
-        
-        # Adaptive pooling if enabled
-        if adaptive_pooling:
-            self.pool = nn.AdaptiveAvgPool2d((4, 4))
-            self.fc = nn.Linear(512 * 4 * 4, output_dim)
-        else:
+        # Pooling
+        if pool_type == "adaptive":
+            self.pool = nn.AdaptiveAvgPool2d(pool_size)
+        elif pool_type == "max":
             self.pool = nn.MaxPool2d(2)
-            self.fc = None  # Will be initialized on first forward
-            
-        self.dropout = nn.Dropout2d(dropout_rate)
-        self.activation = self._get_activation(activation)
-
-    def _conv_block(self, in_c, out_c, kernel_size):
-        return nn.Sequential(
-            nn.Conv2d(in_c, out_c, kernel_size, padding=kernel_size//2),
-            nn.BatchNorm2d(out_c),
-            self._get_activation('leaky_relu'),
-            nn.MaxPool2d(2)
-        )
-
-    def _get_activation(self, name):
-        activations = {
-            'relu': nn.ReLU(),
-            'leaky': nn.LeakyReLU(0.1),
-            'gelu': nn.GELU(),
-            'silu': nn.SiLU()
-        }
-        return activations.get(name.lower(), nn.ReLU())
-
-    def _validate_input_size(self, size):
-        if isinstance(size, int):
-            return (size, size)
-        assert len(size) == 2 and all(s >= self.min_resolution for s in size), \
-            f"Input size must be >= {self.min_resolution} in both dimensions"
-        return tuple(size)
-
-    def forward(self, x: torch.Tensor, input_size: Optional[Tuple[int, int]] = None):
-        """
-        Args:
-            x: Input tensor of shape (B, C, H, W)
-            input_size: Optional manual override (height, width)
-        """
-        if input_size:
-            self.input_size = self._validate_input_size(input_size)
-            
-        # Safety checks
-        assert x.dim() == 4, "Input must be 4D tensor"
-        if self.input_size and not self.adaptive_pooling:
-            assert x.shape[-2:] == self.input_size, \
-                f"Input size {x.shape[-2:]} doesn't match expected {self.input_size}"
-        
-        # Forward pass
-        x = self.conv_blocks(x)
-        
-        if not self.adaptive_pooling:
-            # Initialize FC layer on first run if needed
-            if self.fc is None:
-                self._init_fc(x)
-            x = x.flatten(1)
         else:
-            x = self.pool(x).flatten(1)
-            
-        return self.fc(x)
-
-    def _init_fc(self, sample_tensor):
-        with torch.no_grad():
-            flattened_dim = sample_tensor.flatten(1).shape[1]
-        self.fc = nn.Linear(flattened_dim, self.output_dim).to(sample_tensor.device)
-        nn.init.kaiming_normal_(self.fc.weight)
-
-    @staticmethod
-    def load_image(
-        image_path: str,
-        target_size: Optional[Tuple[int, int]] = None,
-        crop_to_size: Optional[Tuple[int, int]] = None,
-        normalize: bool = True
-    ) -> torch.Tensor:
+            self.pool = None
+        
+        # FC as weight & bias (complex)
+        # flatten_dim computed lazily on first forward if pool_type=="none"
+        self.fc_weight = nn.Parameter(torch.randn(1, output_dim, dtype=torch.complex64))  # placeholder
+        self.fc_bias   = nn.Parameter(torch.zeros(output_dim, dtype=torch.complex64))
+        self._flatten_dim = None
+        
+        self.dropout = nn.Dropout2d(dropout)
+    
+    async def forward(self,
+                      x: torch.Tensor,
+                      input_size: Optional[Tuple[int,int]] = None
+                     ) -> torch.Tensor:
         """
-        Flexible image loading with auto-resizing and optional cropping
-        
-        Args:
-            target_size: Resize to (H, W) while maintaining aspect ratio
-            crop_to_size: Center crop after resizing (if different from target_size)
+        x: real tensor [B, C, H, W]
+        returns: complex multivector [B, output_dim, mv_dim]
         """
-        img = Image.open(image_path).convert('RGB')
+        B, C, H, W = x.shape
+        assert C == self.input_channels
+        assert H >= self.min_resolution and W >= self.min_resolution
         
-        # Resize first (maintaining aspect ratio)
-        if target_size:
-            img.thumbnail((target_size[1], target_size[0]))  # PIL uses (W, H)
+        # promote to complex
+        x_c = x.to(torch.complex64)
         
-        # Center crop if requested
-        if crop_to_size:
-            crop = transforms.CenterCrop(crop_to_size)
-            img = crop(img)
+        # conv blocks
+        for conv in self.convs:
+            w, b = conv["weight"], conv["bias"]
+            x_c = await self.ops.conv2d(x_c, w, b)      # complex conv
+            if self.use_bn:
+                real = conv["bn_real"](x_c.real)
+                imag = conv["bn_imag"](x_c.imag)
+                x_c = torch.complex(real, imag)
+            x_c = conv["act"](x_c)
+            x_c = self.dropout(x_c)
         
-        # Convert to tensor
-        transform = [transforms.ToTensor()]
-        if normalize:
-            transform.append(transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                                 std=[0.229, 0.224, 0.225]))
-        return transforms.Compose(transform)(img).unsqueeze(0)
+        # pooling / flatten
+        if self.pool:
+            # apply to real & imag separately
+            r = self.pool(x_c.real)
+            i = self.pool(x_c.imag)
+            x_flat = torch.complex(r, i).flatten(1)
+        else:
+            # no pooling: flatten full H*W → determine dim once
+            flat = x_c.flatten(1)  # [B, C*H*W]
+            if self._flatten_dim is None:
+                self._flatten_dim = flat.shape[-1]
+                # reinit fc weight to correct shape
+                self.fc_weight.data = torch.randn(self._flatten_dim, self.output_dim, dtype=torch.complex64)
+            x_flat = flat
+        
+        # linear projection
+        # [B, flatten_dim] @ [flatten_dim, output_dim] => [B, output_dim]
+        out = await self.ops.matmul(x_flat, self.fc_weight)
+        out = out + self.fc_bias
+        
+        # embed as multivector for SillyAI
+        mv = tensor_to_multivector(out, n_dims=None)
+        return mv
 
-    def get_expected_shape(self) -> Tuple[int, int, int]:
-        """Returns expected (channels, height, width) for input verification"""
-        return (self.input_channels, *self.input_size) if self.input_size else None
+    def forward_sync(self, x: torch.Tensor) -> torch.Tensor:
+        """Sync path for ONNX export; mirrors async logic."""
+        B, C, H, W = x.shape
+        x_c = x.to(torch.complex64)
+        for conv in self.convs:
+            w, b = conv["weight"], conv["bias"]
+            x_c = self.ops.conv2d(x_c, w, b)  
+            if self.use_bn:
+                real = conv["bn_real"](x_c.real)
+                imag = conv["bn_imag"](x_c.imag)
+                x_c = torch.complex(real, imag)
+            x_c = conv["act"](x_c)
+            x_c = self.dropout(x_c)
+        
+        if self.pool:
+            r = self.pool(x_c.real);  i = self.pool(x_c.imag)
+            x_flat = torch.complex(r,i).flatten(1)
+        else:
+            flat = x_c.flatten(1)
+            if self._flatten_dim is None:
+                self._flatten_dim = flat.shape[-1]
+                self.fc_weight.data = torch.randn(self._flatten_dim, self.output_dim, dtype=torch.complex64)
+            x_flat = flat
+        
+        out = self.ops.matmul_sync(x_flat, self.fc_weight) + self.fc_bias
+        mv  = tensor_to_multivector(out, n_dims=None)
+        return mv
 
 class Word2VecTokenizer:
     """
-    Enhanced word-level tokenizer with pretrained Word2Vec embeddings.
-    
-    Features:
-    - Handles both binary (.bin) and text (.txt) Word2Vec formats
-    - Customizable unknown token handling
-    - Efficient batch processing
-    - PyTorch integration
-    - Subword fallback mechanism
+    Word2Vec tokenizer that produces complex-valued multivector embeddings
+    ready for SillyAI.
     """
-    
     def __init__(
         self,
         w2v_path: Union[str, Path],
+        ops: MultivectorOps,
         unk_token: str = "<UNK>",
         pad_token: str = "<PAD>",
         lowercase: bool = True,
         subword_fallback: bool = False,
-        device: str = "cpu"
+        device: str = "cpu",
+        imag_scale: float = 0.0
     ):
         """
         Args:
-            w2v_path: Path to Word2Vec model file
-            unk_token: Token for unknown words
-            pad_token: Token for padding
-            lowercase: Convert text to lowercase
-            subword_fallback: Try subword matching for OOV words
-            device: Target device for PyTorch tensors
+            w2v_path: Path to .bin or .txt Word2Vec file.
+            ops:      MultivectorOps instance for later pipeline.
+            imag_scale: stddev for random imaginary part (0=zero imag).
         """
         self.unk_token = unk_token
         self.pad_token = pad_token
         self.lowercase = lowercase
         self.subword_fallback = subword_fallback
         self.device = device
-        
-        # Load Word2Vec model
-        self._load_word2vec(w2v_path)
+        self.ops = ops
+        self.imag_scale = imag_scale
+
+        # load and build vocab
+        self._load_w2v(w2v_path)
         self._build_vocab()
-        self._create_embedding_matrix()
-        
-    def _load_word2vec(self, path: Union[str, Path]):
-        """Handle different Word2Vec formats"""
+        self._make_embedding()
+
+    def _load_w2v(self, path: Union[str, Path]):
         path = str(path)
-        binary = path.endswith('.bin')
-        
-        try:
-            self.model = KeyedVectors.load_word2vec_format(path, binary=binary)
-            self.vector_size = self.model.vector_size
-        except Exception as e:
-            raise ValueError(f"Failed to load Word2Vec model from {path}: {str(e)}")
+        binary = path.endswith(".bin")
+        self.model = KeyedVectors.load_word2vec_format(path, binary=binary)
+        self.vec_size = self.model.vector_size
 
     def _build_vocab(self):
-        """Build vocabulary with special tokens"""
-        self.index_to_word = [self.pad_token, self.unk_token] + list(self.model.index_to_key)
+        keys = list(self.model.index_to_key)
+        self.index_to_word = [self.pad_token, self.unk_token] + keys
         self.word_to_index = {w: i for i, w in enumerate(self.index_to_word)}
-        
-        # For subword fallback
         if self.subword_fallback:
-            self._build_subword_index()
+            self._build_subword_index(keys)
 
-    def _build_subword_index(self):
-        """Create n-gram index for subword fallback"""
-        self.subword_index = {}
-        for word in self.model.index_to_key:
-            for i in range(len(word)):
-                ngram = word[i:i+3]  # Use 3-grams
-                if ngram not in self.subword_index:
-                    self.subword_index[ngram] = []
-                self.subword_index[ngram].append(word)
+    def _build_subword_index(self, keys: List[str]):
+        self.subword_index: Dict[str, List[str]] = {}
+        for w in keys:
+            for i in range(len(w)-2):
+                tri = w[i:i+3]
+                self.subword_index.setdefault(tri, []).append(w)
 
-    def _create_embedding_matrix(self):
-        """Initialize embedding matrix with special tokens"""
-        # Pad token gets zeros, UNK gets random initialization
-        pad_vec = np.zeros(self.vector_size, dtype=np.float32)
-        unk_vec = np.random.normal(size=self.vector_size).astype(np.float32)
-        
-        # Stack all embeddings
-        self.embedding_matrix = np.vstack([
+    def _make_embedding(self):
+        # real part from W2V, imag part random (or zero)
+        pad_vec = np.zeros(self.vec_size, np.float32)
+        unk_vec = np.random.normal(size=self.vec_size).astype(np.float32)
+        real_mat = np.vstack([
             pad_vec,
             unk_vec,
-            np.array([self.model[w] for w in self.model.index_to_key])
+            np.array([self.model[w] for w in self.model.index_to_key], np.float32)
         ])
-        
-        # Convert to PyTorch tensor
-        self.embedding_tensor = torch.from_numpy(self.embedding_matrix).to(self.device)
+        imag_mat = np.random.normal(
+            scale=self.imag_scale,
+            size=real_mat.shape
+        ).astype(np.float32) if self.imag_scale > 0 else np.zeros_like(real_mat)
+        complex_mat = real_mat + 1j * imag_mat
+
+        # convert to torch complex tensor
+        self.embedding = torch.from_numpy(complex_mat).to(self.device)
 
     def tokenize(self, text: str) -> List[str]:
-        """Enhanced tokenization with optional subword fallback"""
         if self.lowercase:
             text = text.lower()
-            
-        # Improved regex pattern
-        tokens = re.findall(r"\b\w+(?:'\w+)?\b", text)
-        
+        toks = re.findall(r"\b\w+(?:'\w+)?\b", text)
         if self.subword_fallback:
-            tokens = [self._handle_subword(tok) for tok in tokens]
-            
-        return tokens
+            return [self._subword(tok) for tok in toks]
+        return toks
 
-    def _handle_subword(self, word: str) -> str:
-        """Attempt subword matching for OOV words"""
-        if word in self.word_to_index:
-            return word
-            
-        # Try n-gram matching
-        for i in range(len(word)):
-            ngram = word[i:i+3]
-            if ngram in self.subword_index:
-                candidates = self.subword_index[ngram]
-                # Return first match (could implement better scoring)
-                return candidates[0]
-                
+    def _subword(self, tok: str) -> str:
+        if tok in self.word_to_index:
+            return tok
+        for i in range(len(tok)-2):
+            tri = tok[i:i+3]
+            if tri in self.subword_index:
+                return self.subword_index[tri][0]
         return self.unk_token
 
     def encode(
@@ -274,138 +242,89 @@ class Word2VecTokenizer:
         text: str,
         max_length: Optional[int] = None,
         padding: bool = False,
-        return_tensors: str = None
+        return_tensors: Optional[str] = None
     ) -> Union[List[int], torch.Tensor]:
-        """
-        Enhanced encoding with padding options
-        
-        Args:
-            text: Input text to encode
-            max_length: Truncate/pad to this length
-            padding: Whether to pad sequences
-            return_tensors: 'pt' for PyTorch tensor, None for list
-            
-        Returns:
-            List of indices or PyTorch tensor
-        """
-        tokens = self.tokenize(text)
+        toks = self.tokenize(text)
         unk_idx = self.word_to_index[self.unk_token]
-        indices = [self.word_to_index.get(tok, unk_idx) for tok in tokens]
-        
-        # Handle truncation/padding
-        if max_length is not None:
-            if len(indices) > max_length:
-                indices = indices[:max_length]
+        ids = [self.word_to_index.get(t, unk_idx) for t in toks]
+        if max_length:
+            pad_idx = self.word_to_index[self.pad_token]
+            if len(ids) > max_length:
+                ids = ids[:max_length]
             elif padding:
-                pad_idx = self.word_to_index[self.pad_token]
-                indices += [pad_idx] * (max_length - len(indices))
-                
+                ids += [pad_idx] * (max_length - len(ids))
         if return_tensors == 'pt':
-            return torch.tensor(indices, device=self.device)
-        return indices
+            return torch.tensor(ids, device=self.device)
+        return ids
 
     def batch_encode(
         self,
         texts: List[str],
-        max_length: Optional[int] = None,
-        padding: bool = True,
-        truncation: bool = True
+        max_length: Optional[int] = None
     ) -> Dict[str, torch.Tensor]:
-        """
-        Batch encoding for multiple texts
-        
-        Returns:
-            Dictionary with 'input_ids' and 'attention_mask'
-        """
-        encoded = [self.encode(text, max_length, padding, 'pt') for text in texts]
-        input_ids = torch.stack(encoded)
-        
-        # Create attention mask
-        attention_mask = (input_ids != self.word_to_index[self.pad_token]).long()
-        
-        return {
-            'input_ids': input_ids,
-            'attention_mask': attention_mask
-        }
+        encs = [self.encode(t, max_length, padding=True, return_tensors='pt')
+                for t in texts]
+        input_ids = torch.stack(encs, dim=0)            # [B, S]
+        attention_mask = (input_ids != self.word_to_index[self.pad_token])\
+                         .to(torch.long)
+        return {'input_ids': input_ids, 'attention_mask': attention_mask}
 
-    def decode(self, indices: Union[List[int], torch.Tensor]) -> List[str]:
-        """Decode indices back to text"""
-        if isinstance(indices, torch.Tensor):
-            indices = indices.tolist()
-            
-        max_idx = len(self.index_to_word) - 1
-        return [
-            self.index_to_word[i] if 0 <= i <= max_idx else self.unk_token
-            for i in indices
-            if i != self.word_to_index[self.pad_token]  # Skip padding
-        ]
+    def decode(self, ids: Union[List[int], torch.Tensor]) -> List[str]:
+        if isinstance(ids, torch.Tensor):
+            ids = ids.tolist()
+        max_i = len(self.index_to_word)-1
+        return [self.index_to_word[i] if 0 <= i <= max_i else self.unk_token
+                for i in ids if i != self.word_to_index[self.pad_token]]
+
+    async def embed_async(
+        self,
+        input_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Async lookup → complex embeddings → multivector channels.
+        input_ids: [B, S] long tensor
+        returns:  [B, S, vec_size, mv_dim]
+        """
+        # [B, S, D]
+        emb = self.embedding[input_ids]
+        # reshape to [B*S, D]
+        B, S, D = emb.shape
+        flat = emb.view(B*S, D)
+        # optionally apply an MV Op, e.g. a learned linear projection
+        # here we skip, and directly convert
+        complex_feats = flat                                # already complex
+        mv = tensor_to_multivector(
+            complex_feats.view(B, S, D),
+            n_dims=None
+        )
+        return mv
 
     def embed(
         self,
-        inputs: Union[str, List[int], torch.Tensor],
-        return_tensors: str = 'pt'
-    ) -> Union[np.ndarray, torch.Tensor]:
+        input_ids: torch.Tensor
+    ) -> torch.Tensor:
         """
-        Flexible embedding lookup
-        
-        Args:
-            inputs: Can be text, indices, or tensor
-            return_tensors: 'pt' for PyTorch, 'np' for numpy
-            
-        Returns:
-            Embeddings matrix (num_tokens, dim)
+        Sync version for ONNX or direct use.
         """
-        if isinstance(inputs, str):
-            indices = self.encode(inputs, return_tensors='pt')
-        elif isinstance(inputs, list):
-            indices = torch.tensor(inputs, device=self.device)
-        else:
-            indices = inputs.to(self.device)
-            
-        embeddings = self.embedding_tensor[indices]
-        
-        if return_tensors == 'np':
-            return embeddings.cpu().numpy()
-        return embeddings
+        emb = self.embedding[input_ids]
+        B, S, D = emb.shape
+        mv = tensor_to_multivector(emb, n_dims=None)
+        return mv
 
     def get_vocab_size(self) -> int:
-        """Total vocabulary size including special tokens"""
         return len(self.index_to_word)
 
     def get_embedding_matrix(self) -> torch.Tensor:
-        """Get the full embedding matrix as PyTorch tensor"""
-        return self.embedding_tensor
-
-    def save_vocab(self, path: Union[str, Path]):
-        """Save vocabulary to file"""
-        with open(path, 'w') as f:
-            for word in self.index_to_word:
-                f.write(f"{word}\n")
+        return self.embedding
 
     @classmethod
     def from_pretrained(
         cls,
-        path: Union[str, Path],
-        vocab_path: Optional[Union[str, Path]] = None,
-        **kwargs
+        w2v_path: Union[str, Path],
+        ops: MultivectorOps,
+        **kwargs: Any
     ):
-        """
-        Create tokenizer from pretrained files
-        
-        Args:
-            path: Path to Word2Vec model
-            vocab_path: Optional custom vocabulary file
-            **kwargs: Additional init arguments
-        """
-        tokenizer = cls(path, **kwargs)
-        
-        if vocab_path is not None:
-            with open(vocab_path) as f:
-                custom_vocab = [line.strip() for line in f]
-            tokenizer.index_to_word = custom_vocab
-            tokenizer.word_to_index = {w: i for i, w in enumerate(custom_vocab)}
-            
-        return tokenizer
+        return cls(w2v_path, ops, **kwargs)
 
 class ModalityManager(nn.Module):
     def __init__(self, config: ModelConfig):

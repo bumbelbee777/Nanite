@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Dict
 
 from .ops import PrecisionLevel
 
@@ -16,6 +16,8 @@ class ModelConfig:
     cache_max_bytes:   int             = 1 << 26
     decomp_threshold:  int             = 1_000_000
     decomp_gain_ratio: float           = 0.5
+
+    modalities:        Optional[Dict[str, int]]     = None
 
     device:           Optional[str]     = None
     dtype:            Optional[str]     = None

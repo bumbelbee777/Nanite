@@ -1,406 +1,193 @@
-import asyncio
-import logging
-import random
-from collections import defaultdict, deque
-import heapq
-import math
-from typing import Optional, List, Dict, Set, Tuple, Any
-
+from __future__ import annotations
+from dataclasses import dataclass, field
+from collections import deque, defaultdict
+from typing import Optional, Dict, Set, List, Tuple, Any
+import random, logging, copy
 import torch
-import torch.functional as F
-import torch.nn as nn
 
-from .config import ModelConfig
-from .core import LinearLayer
-
-# Configure module-level logger
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-handler = logging.StreamHandler()
-formatter = logging.Formatter('[%(asctime)s] %(levelname)s in %(module)s: %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
 
-
+@dataclass(slots=True)
 class Connection:
-    def __init__(
-        self,
-        target: str,
-        weight: float = 1.0,
-        relationship: str = "co-occurrence",
-        confidence: float = 1.0
-    ):
-        self.target = target
-        self.weight = weight
-        self.relationship = relationship
-        self.confidence = confidence
+    target: str
+    weight: float = 1.0
+    relationship: str = "co-occurrence"
+    confidence: float = 1.0
 
-    def __repr__(self):
-        return (
-            f"Connection(target={self.target!r}, weight={self.weight:.3f}, "
-            f"relationship={self.relationship!r}, confidence={self.confidence:.3f})"
-        )
-
+@dataclass(slots=True)
 class Concept:
-    def __init__(
-        self,
-        name: str,
-        energy: float = 0.0,
-        description: str = "",
-        domain: Optional[str] = None,
-        source: Optional[str] = None
-    ):
-        self.name = name
-        self.energy = energy
-        self.connections: List[Connection] = []
-        self.access_count = 0
-        self.last_access_time = 0
-
-        # for token/vector association
-        self.token_ids: Set[int] = set()
-        self.embedding: Optional[torch.Tensor] = None
-
-        # metadata
-        self.tags: Set[str] = set()
-        self.description = description
-        self.domain = domain
-        self.source = source
-
-        # region membership
-        self.regions: Set[str] = set()
-
-    def __repr__(self):
-        conns = ', '.join(repr(c) for c in self.connections)
-        tags = ','.join(self.tags)
-        toks = ','.join(str(t) for t in self.token_ids)
-        regs = ','.join(self.regions)
-        return (
-            f"Concept(name={self.name!r}, energy={self.energy:.3f}, "
-            f"tags=[{tags}], tokens=[{toks}], regions=[{regs}], "
-            f"access_count={self.access_count}, last_access_time={self.last_access_time}, "
-            f"connections=[{conns}])"
-        )
-
-    def add_connection(self, target: str, weight: float, relationship: str) -> None:
-        self.connections.append(Connection(target, weight, relationship))
-
-class ReasoningStep:
-    def __init__(
-        self,
-        frm: str,
-        to: str,
-        relationship: str,
-        justification: Optional[str] = None,
-        confidence: float = 1.0
-    ):
-        self.frm = frm
-        self.to = to
-        self.relationship = relationship
-        self.justification = justification
-        self.confidence = confidence
-
-    def __repr__(self):
-        return (
-            f"{self.frm} -[{self.relationship}/{self.confidence:.2f}]-> {self.to}"
-            + (f" {{{self.justification}}}" if self.justification else "")
-        )
-
-class GraphRegion:
-    def __init__(self, name: str, purpose: Optional[str] = None):
-        self.name = name
-        self.purpose = purpose
-        self.concepts: Set[str] = set()
-
-    def __repr__(self):
-        return f"GraphRegion(name={self.name!r}, purpose={self.purpose!r}, size={len(self.concepts)})"
+    name: str
+    energy: float = 0.0
+    tags: Set[str] = field(default_factory=set)
+    description: str = ""
+    domain: Optional[str] = None
+    source: Optional[str] = None
+    token_ids: Set[int] = field(default_factory=set)
+    embedding: Optional[torch.Tensor] = None
+    access_count: int = 0
+    last_access_time: int = 0
+    regions: Set[str] = field(default_factory=set)
 
 class ConceptGraph:
-    def __init__(self):
-        self.concepts = {}
-        self.connections = {}
-        self._module = None
-        self._time = 0
-        self.decay_rate = 0.1
+    __slots__ = (
+        "concepts", "adj", "time", "decay_rate",
+        "_in_degree", "_out_degree",
+        "regions", "region_meta"
+    )
+    
+    def __init__(self, decay_rate: float = 0.1):
+        self.concepts: Dict[str, Concept] = {}
+        self.adj: Dict[str, List[Connection]] = defaultdict(list)
+        self.time = 0
+        self.decay_rate = decay_rate
+        self._in_degree: Dict[str,int] = defaultdict(int)
+        self._out_degree: Dict[str,int] = defaultdict(int)
+        self.regions: Dict[str, Set[str]] = {}            # region_name → set of concepts
+        self.region_meta: Dict[str, Any] = {}             # region_name → purpose/metadata
 
-    def __getstate__(self):
-        """Return state for pickling"""
-        state = self.__dict__.copy()
-        # Remove the module since it's not picklable
-        state['_module'] = None
-        return state
-
-    def __setstate__(self, state):
-        """Set state during unpickling"""
-        self.__dict__.update(state)
-        # Reinitialize any non-picklable attributes
-        self._module = None
-
-    def add_concept(self, name: str, metadata: Optional[Dict] = None) -> str:
-        """Add a concept to the graph"""
+    def add_concept(self, name: str, **meta) -> Concept:
         if name not in self.concepts:
-            self.concepts[name] = Concept(name, metadata)
-            self.connections[name] = []
-        return name
+            self.concepts[name] = Concept(name, **meta)
+        return self.concepts[name]
 
-    def add_relationship(self, source: str, target: str, metadata: Optional[Dict] = None) -> None:
-        """Add a relationship between concepts"""
-        if source not in self.concepts or target not in self.concepts:
-            raise ValueError("Both source and target concepts must exist")
-        
-        connection = Connection(target, metadata=metadata)
-        self.connections[source].append(connection)
-
-    def get_concept(self, name: str) -> Optional[Concept]:
-        """Get a concept by name"""
-        return self.concepts.get(name)
-
-    def get_connections(self, concept: str) -> List[Connection]:
-        """Get all connections from a concept"""
-        return self.connections.get(concept, [])
-
-    def remove_concept(self, name: str) -> None:
-        """Remove a concept and its connections"""
-        if name in self.concepts:
-            del self.concepts[name]
-            del self.connections[name]
-            # Remove connections to this concept
-            for connections in self.connections.values():
-                connections[:] = [c for c in connections if c.target != name]
-
-    def update_concept(self, name: str, metadata: Dict) -> None:
-        """Update concept metadata"""
-        if name in self.concepts:
-            self.concepts[name].metadata.update(metadata)
-
-    def update_relationship(self, source: str, target: str, metadata: Dict) -> None:
-        """Update relationship metadata"""
-        if source in self.connections:
-            for conn in self.connections[source]:
-                if conn.target == target:
-                    conn.metadata.update(metadata)
-                    break
-
-    def get_related_concepts(self, concept: str, max_depth: int = 1) -> Set[str]:
-        """Get related concepts up to max_depth"""
-        if concept not in self.concepts:
-            return set()
-            
-        related = set()
-        queue = [(concept, 0)]
-        visited = {concept}
-        
-        while queue:
-            current, depth = queue.pop(0)
-            if depth < max_depth:
-                for conn in self.connections[current]:
-                    if conn.target not in visited:
-                        visited.add(conn.target)
-                        related.add(conn.target)
-                        queue.append((conn.target, depth + 1))
-                        
-        return related
-
-    def get_concept_path(self, start: str, end: str) -> Optional[List[str]]:
-        """Find shortest path between concepts"""
-        if start not in self.concepts or end not in self.concepts:
-            return None
-            
-        queue = [(start, [start])]
-        visited = {start}
-        
-        while queue:
-            current, path = queue.pop(0)
-            for conn in self.connections[current]:
-                if conn.target == end:
-                    return path + [end]
-                if conn.target not in visited:
-                    visited.add(conn.target)
-                    queue.append((conn.target, path + [conn.target]))
-                    
-        return None
-
-    def get_concept_subgraph(self, concepts: Set[str]) -> "ConceptGraph":
-        """Extract subgraph containing only specified concepts"""
-        subgraph = ConceptGraph()
-        
-        # Copy concepts
-        for name in concepts:
-            if name in self.concepts:
-                subgraph.concepts[name] = self.concepts[name]
-                
-        # Copy relevant connections
-        for name in concepts:
-            if name in self.connections:
-                subgraph.connections[name] = [
-                    conn for conn in self.connections[name]
-                    if conn.target in concepts
-                ]
-                
-        return subgraph
-
-    def merge_graphs(self, other: "ConceptGraph") -> None:
-        """Merge another graph into this one"""
-        # Merge concepts
-        for name, concept in other.concepts.items():
-            if name not in self.concepts:
-                self.concepts[name] = concept
-            else:
-                # Update existing concept
-                self.concepts[name].metadata.update(concept.metadata)
-                
-        # Merge connections
-        for name, connections in other.connections.items():
-            if name not in self.connections:
-                self.connections[name] = connections
-            else:
-                # Add new connections
-                existing_targets = {conn.target for conn in self.connections[name]}
-                for conn in connections:
-                    if conn.target not in existing_targets:
-                        self.connections[name].append(conn)
-
-    def compute_concept_similarity(self, concept1: str, concept2: str) -> float:
-        """Compute similarity between two concepts"""
-        if concept1 not in self.concepts or concept2 not in self.concepts:
-            return 0.0
-            
-        # Get sets of related concepts
-        related1 = self.get_related_concepts(concept1)
-        related2 = self.get_related_concepts(concept2)
-        
-        # Compute Jaccard similarity
-        intersection = len(related1.intersection(related2))
-        union = len(related1.union(related2))
-        
-        return intersection / union if union > 0 else 0.0
-
-    def get_concept_clusters(self, threshold: float = 0.5) -> List[Set[str]]:
-        """Cluster concepts based on similarity"""
-        clusters = []
-        unclustered = set(self.concepts.keys())
-        
-        while unclustered:
-            # Start new cluster with first unclustered concept
-            current = unclustered.pop()
-            cluster = {current}
-            
-            # Find similar concepts
-            for concept in list(unclustered):
-                if self.compute_concept_similarity(current, concept) >= threshold:
-                    cluster.add(concept)
-                    unclustered.remove(concept)
-                    
-            clusters.append(cluster)
-            
-        return clusters
-
-    def prune_weak_connections(self, threshold: float = 0.1) -> None:
-        """Remove connections with low weights"""
-        for name in self.connections:
-            self.connections[name] = [
-                conn for conn in self.connections[name]
-                if conn.weight >= threshold
-            ]
-
-    def get_central_concepts(self, top_k: int = 5) -> List[Tuple[str, float]]:
-        """Get most central concepts based on connection count"""
-        centrality = {}
-        for name in self.concepts:
-            # Outgoing connections
-            out_degree = len(self.connections[name])
-            # Incoming connections
-            in_degree = sum(
-                1 for conns in self.connections.values()
-                for conn in conns if conn.target == name
-            )
-            centrality[name] = out_degree + in_degree
-            
-        return sorted(
-            centrality.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )[:top_k]
-
-    def propagate_energy(self):
-        """Propagate energy through concept graph with proper distribution."""
-        # Save initial energies and prepare new energy state
-        initial_energies = {name: concept.energy for name, concept in self.concepts.items()}
-        new_energies = {name: 0.0 for name in self.concepts}
-
-        # First pass: calculate energy distribution
-        for name, concept in self.concepts.items():
-            current_energy = initial_energies[name]
-            if current_energy <= 0:
-                continue
-
-            # Calculate retained vs propagated energy
-            retained = current_energy * self.decay_rate
-            new_energies[name] += retained
-            
-            # Calculate propagation energy
-            propagate_energy = current_energy * (1 - self.decay_rate)
-            if not concept.connections:
-                new_energies[name] += propagate_energy  # Keep remaining energy if no connections
-                continue
-
-            # Normalize connection weights for fair distribution
-            total_weight = sum(conn.weight for conn in concept.connections)
-            if total_weight > 0:
-                for conn in concept.connections:
-                    target = conn.target
-                    if target in self.concepts:  # Ensure target exists
-                        # Calculate energy share based on connection weight
-                        energy_share = propagate_energy * (conn.weight / total_weight)
-                        new_energies[target] += energy_share
-
-        # Update all concept energies with new values
-        for name, energy in new_energies.items():
-            self.concepts[name].energy = energy
-
-        logger.debug(f"Energy propagation complete. New energies: {new_energies}")
-
-    def update_n_cluster(self, min_energy=0.1, purge_threshold=10):
-        """Update concept cluster, removing low energy/access concepts."""
-        to_remove = []
-        for name, concept in self.concepts.items():
-            if concept.energy < min_energy and concept.access_count < purge_threshold:
-                to_remove.append(name)
-
-        for name in to_remove:
-            self._remove_concept(name)
-
-    def _remove_concept(self, name):
-        """Remove a concept and its connections."""
+    def remove_concept(self, name: str):
         if name not in self.concepts:
             return
-
-        # Remove connections to this concept from others
-        concept = self.concepts[name]
-        for conn in concept.connections:
-            other = self.concepts.get(conn.target)
-            if other:
-                other.connections = [c for c in other.connections if c.target != name]
-
-        # Remove the concept itself
+        # remove from regions
+        for r in list(self.concepts[name].regions):
+            self.regions.get(r, set()).discard(name)
+        # delete concept & adjust degrees
         del self.concepts[name]
+        out_conns = self.adj.pop(name, [])
+        for c in out_conns:
+            self._in_degree[c.target] -= 1
+        for src, conns in self.adj.items():
+            keep = []
+            for c in conns:
+                if c.target == name:
+                    self._out_degree[src] -= 1
+                    self._in_degree[name] -= 1
+                else:
+                    keep.append(c)
+            self.adj[src] = keep
 
-    def _update_access(self, name):
-        """Update access count and time for a concept."""
-        if name in self.concepts:
-            self.concepts[name].access_count += 1
-            self.concepts[name].last_access_time = self._time
-            self._time += 1
+    def add_edge(self, src: str, tgt: str, **kw) -> Connection:
+        if src not in self.concepts or tgt not in self.concepts:
+            raise KeyError("Both source and target concepts must exist")
+        conn = Connection(target=tgt, **kw)
+        self.adj[src].append(conn)
+        self._out_degree[src] += 1
+        self._in_degree[tgt] += 1
+        return conn
 
-    def __str__(self) -> str:
-        lines = []
-        for name, c in self.concepts.items():
-            conns = ', '.join(f"{x.target}({x.weight:.2f},{x.relationship})"
-                              for x in c.connections)
-            lines.append(f"{name}: E={c.energy:.2f}, A={c.access_count}, Conns=[{conns}]")
-        return "\n".join(lines)
+    def get(self, name: str) -> Optional[Concept]:
+        return self.concepts.get(name)
 
-    def __repr__(self) -> str:
-        return self.__str__()
+    def neighbors(self, name: str) -> List[Connection]:
+        return self.adj.get(name, [])
+
+    def propagate_energy(self):
+        decay = self.decay_rate
+        new_e = {n: 0.0 for n in self.concepts}
+        for n, concept in self.concepts.items():
+            e = concept.energy
+            if e <= 0.0:
+                continue
+            retained = e * decay
+            new_e[n] += retained
+            prop_total = e - retained
+            conns = self.adj.get(n)
+            if not conns:
+                new_e[n] += prop_total
+            else:
+                wsum = sum(c.weight for c in conns)
+                if wsum > 0:
+                    factor = prop_total / wsum
+                    for c in conns:
+                        new_e[c.target] += c.weight * factor
+        for n, e in new_e.items():
+            self.concepts[n].energy = e
+        logger.debug("Energy propagated")
+
+    def decay(self):
+        r = self.decay_rate
+        for c in self.concepts.values():
+            c.energy *= r
+        self.time += 1
+        logger.debug("Global decay applied, time=%d", self.time)
+        return self.time
+
+    def find_path(self, start: str, end: str, max_hops: int = 4) -> List[str]:
+        if start not in self.concepts or end not in self.concepts:
+            return []
+        q = deque([[start]])
+        seen = {start}
+        while q:
+            path = q.popleft()
+            if len(path) > max_hops:
+                continue
+            last = path[-1]
+            for c in self.adj.get(last, ()):
+                tgt = c.target
+                if tgt in seen:
+                    continue
+                newp = path + [tgt]
+                if tgt == end:
+                    return newp
+                seen.add(tgt)
+                q.append(newp)
+        return []
+
+    def sample_path(self, start: str, max_len: int = 6) -> List[str]:
+        if start not in self.concepts:
+            return []
+        path = [start]
+        for _ in range(max_len):
+            conns = self.adj.get(path[-1], ())
+            if not conns:
+                break
+            weights = [(self.concepts[c.target].energy + 1e-6) * c.weight for c in conns]
+            chosen = random.choices(conns, weights)[0]
+            path.append(chosen.target)
+        return path
+
+    def similarity(self, a: str, b: str) -> float:
+        if a not in self.concepts or b not in self.concepts:
+            return 0.0
+        sa = {c.target for c in self.adj.get(a, ())}
+        sb = {c.target for c in self.adj.get(b, ())}
+        inter = sa & sb
+        uni = sa | sb
+        return len(inter) / len(uni) if uni else 0.0
+
+    def centrality(self, k: int = 5) -> List[Tuple[str, int]]:
+        scores = {n: self._in_degree.get(n, 0) + self._out_degree.get(n, 0)
+                  for n in self.concepts}
+        return sorted(scores.items(), key=lambda x: -x[1])[:k]
+
+    def prune(self, energy_thresh: float, access_thresh: int = 0):
+        to_del = [n for n, c in self.concepts.items()
+                  if c.energy < energy_thresh and c.access_count < access_thresh]
+        for n in to_del:
+            self.remove_concept(n)
+            logger.debug("Pruned concept %s", n)
+
+    def cluster_concepts(self, threshold: float) -> List[Set[str]]:
+        names = list(self.concepts)
+        clusters: List[Set[str]] = []
+        assigned: Set[str] = set()
+        for name in names:
+            if name in assigned:
+                continue
+            cluster = {name}
+            assigned.add(name)
+            for other in names:
+                if other not in assigned and self.similarity(name, other) >= threshold:
+                    cluster.add(other)
+                    assigned.add(other)
+            clusters.append(cluster)
+        logger.debug("Formed %d clusters (thresh=%.2f)", len(clusters), threshold)
+        return clusters
 
     def associate_token(
         self,
@@ -408,177 +195,60 @@ class ConceptGraph:
         token_id: int,
         embedding: Optional[torch.Tensor] = None,
         alpha: float = 0.9
-    ) -> None:
-        """Bind a token ID (and its embedding) to a concept."""
-        if concept_name not in self.concepts:
-            self.add_concept(concept_name)
-        c = self.concepts[concept_name]
+    ):
+        """Bind a token (and optional embedding) to a concept."""
+        c = self.add_concept(concept_name)
         c.token_ids.add(token_id)
         if embedding is not None:
+            emb = embedding.detach()
             if c.embedding is None:
-                c.embedding = embedding.detach().clone()
+                c.embedding = emb.clone()
             else:
-                c.embedding = alpha * c.embedding + (1 - alpha) * embedding.detach()
+                c.embedding = alpha * c.embedding + (1 - alpha) * emb
+        logger.debug("Associated token %d → %s", token_id, concept_name)
 
     def get_concepts_by_token(self, token_id: int) -> List[str]:
-        return [name for name, concept in self.concepts.items() if token_id in concept.token_ids]
+        return [n for n, c in self.concepts.items() if token_id in c.token_ids]
 
-    def tag_concept(self, name: str, tag: str) -> None:
-        if name in self.concepts:
-            self.concepts[name].tags.add(tag)
-
-    def describe_concept(self, name: str, description: str) -> None:
-        if name in self.concepts:
-            self.concepts[name].description = description
-
-    def define_region(self, region_name: str, purpose: Optional[str] = None) -> None:
+    def define_region(self, region_name: str, purpose: Any = None):
         if region_name not in self.regions:
-            self.regions[region_name] = GraphRegion(region_name, purpose)
+            self.regions[region_name] = set()
+            self.region_meta[region_name] = purpose
+        logger.debug("Defined region %s (purpose=%r)", region_name, purpose)
 
-    def add_to_region(self, region_name: str, concept_name: str) -> None:
+    def add_to_region(self, region_name: str, concept_name: str):
+        if concept_name not in self.concepts:
+            raise KeyError(f"Concept {concept_name!r} not found")
         self.define_region(region_name)
-        self.add_concept(concept_name)
-        self.regions[region_name].concepts.add(concept_name)
+        self.regions[region_name].add(concept_name)
         self.concepts[concept_name].regions.add(region_name)
+        logger.debug("Added %s to region %s", concept_name, region_name)
 
-    def get_region(self, region_name: str) -> Optional[GraphRegion]:
+    def get_region(self, region_name: str) -> Optional[Set[str]]:
         return self.regions.get(region_name)
 
-    def find_paths(
-        self,
-        start: str,
-        goal: str,
-        max_hops: int = 4,
-        method: str = "bfs"
-    ) -> List[List[ReasoningStep]]:
-        """Return all simple paths (up to max_hops) or BFS chains."""
-        if start not in self.concepts or goal not in self.concepts:
-            return []
+    def get_concept_subgraph(self, names: Set[str]) -> ConceptGraph:
+        """Extract a new graph over a subset of concepts."""
+        sub = ConceptGraph(decay_rate=self.decay_rate)
+        # copy concepts
+        for n in names:
+            if n in self.concepts:
+                sub.concepts[n] = copy.deepcopy(self.concepts[n])
+        # copy edges among them
+        for src in names:
+            for c in self.adj.get(src, ()):
+                if c.target in names:
+                    sub.adj[src].append(copy.deepcopy(c))
+                    sub._out_degree[src] += 1
+                    sub._in_degree[c.target] += 1
+        return sub
 
-        paths = []
-        queue = deque([[start]])
-        while queue:
-            path = queue.popleft()
-            if len(path) > max_hops:
-                continue
-            last = path[-1]
-            if last == goal and len(path) > 1:
-                # build ReasoningStep list
-                steps = []
-                for a, b in zip(path, path[1:]):
-                    # find first connection
-                    conn = next((c for c in self.concepts[a].connections if c.target == b), None)
-                    if not conn:
-                        break
-                    steps.append(ReasoningStep(a, b, conn.relationship, confidence=conn.confidence))
-                else:
-                    paths.append(steps)
-                continue
-
-            for conn in self.concepts[last].connections:
-                if conn.target not in path:
-                    queue.append(path + [conn.target])
-
-        return paths
-
-    def sample_reasoning_path(
-        self,
-        start: str,
-        goal: Optional[str] = None,
-        max_len: int = 6
-    ) -> List[ReasoningStep]:
-        """Random-walk (Monte Carlo) from start to goal (or open-ended)."""
-        if start not in self.concepts:
-            return []
-        steps: List[ReasoningStep] = []
-        current = start
-        for _ in range(max_len):
-            conns = self.concepts[current].connections
-            if not conns:
-                break
-            # sample by weighted (energy * weight)
-            weights = [(self.concepts[c.target].energy + 1e-6) * c.weight for c in conns]
-            idx = random.choices(range(len(conns)), weights)[0]
-            conn = conns[idx]
-            step = ReasoningStep(current, conn.target, conn.relationship, confidence=conn.confidence)
-            steps.append(step)
-            current = conn.target
-            if goal is not None and current == goal:
-                break
-        return steps
-
-    def compute_entanglement(self) -> Dict[Tuple[str,str], float]:
-        """Pairwise entanglement = cosine(sim) * co-activation freq."""
-        ent = {}
-        names = list(self.concepts.keys())
-        for i, a in enumerate(names):
-            for b in names[i+1:]:
-                ca = self.concepts[a]
-                cb = self.concepts[b]
-                # rough proxy: embedding cosine if available
-                sim = 0.0
-                if ca.embedding is not None and cb.embedding is not None:
-                    sim = F.cosine_similarity(ca.embedding, cb.embedding, dim=0).item()
-                # co-activation = times accessed within window
-                freq = min(ca.access_count, cb.access_count)
-                ent[(a,b)] = sim * math.log1p(freq)
-        return ent
-
-    def shuffle_graph(self, key: Optional[Any] = None) -> None:
-        """Reorder concept dict for locality (in-place)."""
-        items = list(self.concepts.items())
-        random.Random(key).shuffle(items)
-        self.concepts = dict(items)
-
-    def query_by_relationship(self, rel: str) -> List[Tuple[str,str]]:
-        return [
-            (c.name, conn.target)
-            for c in self.concepts.values()
-            for conn in c.connections
-            if conn.relationship == rel
-        ]
-
-    def add_node(self, name: str, energy: float = 0.0) -> Concept:
-        if name in self.concepts:
-            raise ValueError(f"Node '{name}' already exists.")
-        concept = Concept(name=name, energy=energy)
-        self.concepts[name] = concept
-        return concept
-
-    def add_edge(self, source: str, target: str, weight: float = 1.0) -> Connection:
-        if source not in self.concepts or target not in self.concepts:
-            raise ValueError("Both source and target nodes must exist.")
-        connection = Connection(target=target, weight=weight)
-        self.connections[source].append(connection)
-        return connection
-
-    def get_node(self, name: str) -> Optional[Concept]:
-        return self.concepts.get(name)
-
-    def get_edge(self, source: str, target: str) -> Optional[Connection]:
-        if source in self.connections:
-            for connection in self.connections[source]:
-                if connection.target == target:
-                    return connection
-        return None
-
-class ConceptSystem(nn.Module):
-    def __init__(self, config: ModelConfig):
-        super().__init__()
-        self.config = config
-        self.concept_graph = ConceptGraph()
-        self.concept_projector = LinearLayer(
-            self.config.d_model,
-            self.config.concept_dim,
-            factorized=self.config.factorized_linear,
-            kronecker_rank=self._valid_kronecker_rank(
-                self.config.kronecker_rank,
-                self.config.d_model,
-                self.config.concept_dim
-            )
-        )
-        
-    def get_concept_projections(self, x):
-        concept_feats = self.concept_projector(x)
-        norms = torch.norm(concept_feats, dim=-1, keepdim=True)
-        return concept_feats / (norms + 1e-8)
+    def clear(self):
+        self.concepts.clear()
+        self.adj.clear()
+        self._in_degree.clear()
+        self._out_degree.clear()
+        self.regions.clear()
+        self.region_meta.clear()
+        self.time = 0
+        logger.debug("Cleared entire graph")

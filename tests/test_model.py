@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 import torch.testing
 
-from ops import AsyncLRUTensorCache, OptimizedComplexOps, PrecisionLevel
+from ops import AsyncLRUTensorCache, MultivectorOps, PrecisionLevel
 from config import ModelConfig
 from model import SillyAI
 
@@ -62,7 +62,7 @@ async def test_cache_eviction_lru_lfu():
 
 @pytest.mark.asyncio
 async def test_optimized_complex_ops_matmul_and_fft():
-    ops = OptimizedComplexOps(cache_max_bytes=1 << 20)
+    ops = MultivectorOps(cache_max_bytes=1 << 20)
 
     # test matmul
     a = torch.randn(4, 4, dtype=torch.complex64)
@@ -79,7 +79,7 @@ async def test_optimized_complex_ops_matmul_and_fft():
 
 @pytest.mark.asyncio
 async def test_optimized_complex_ops_conv1d():
-    ops = OptimizedComplexOps(cache_max_bytes=1 << 20)
+    ops = MultivectorOps(cache_max_bytes=1 << 20)
 
     # use real dtype for conv1d, since F.conv1d doesn't support complex by default
     x = torch.randn(2, 3, 8)
