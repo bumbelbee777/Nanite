@@ -397,3 +397,40 @@ class SillyVM:
     def run(self):
         scheduler = ExecutionScheduler(self.engine)
         asyncio.run(scheduler.schedule_execution())
+
+class BytecodeProgram:
+    """
+    Represents a human-readable bytecode program that can be executed by the SillyVM.
+    Provides utilities for loading from a list of instructions, pretty-printing, and running.
+    """
+    def __init__(self, instructions=None):
+        self.instructions = instructions or []  # List of (opcode, [args])
+
+    @classmethod
+    def from_concept_graph(cls, bytecode_list):
+        """Create a BytecodeProgram from a list of (opcode, args) tuples."""
+        return cls(instructions=bytecode_list)
+
+    def add_instruction(self, opcode, args):
+        self.instructions.append((opcode, args))
+
+    def __len__(self):
+        return len(self.instructions)
+
+    def __getitem__(self, idx):
+        return self.instructions[idx]
+
+    def pretty_print(self):
+        for idx, (op, args) in enumerate(self.instructions):
+            print(f"{idx:04d}: {op} {', '.join(map(str, args))}")
+
+    def to_pipeline(self):
+        """Convert to a pipeline for execution in the VM."""
+        return InstructionPipeline([(Opcode[op] if isinstance(op, str) else op, args) for op, args in self.instructions])
+
+    def run(self, vm=None):
+        """Run this program in a SillyVM instance (if provided) or create a new one."""
+        if vm is None:
+            vm = SillyVM([(Opcode[op] if isinstance(op, str) else op, args) for op, args in self.instructions])
+        vm.run()
+        return vm
