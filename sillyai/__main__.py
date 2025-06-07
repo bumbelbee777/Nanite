@@ -8,8 +8,11 @@ import os
 from datetime import timedelta
 import time
 
-from .api import SillyAI, ModelConfig
+from .model import SillyAI
+from .config import ModelConfig, PrecisionLevel
 from .utils import ChunkedMMapDataset, IterableMMapDataset, CACHE_DIR
+from .ops import MultivectorOps
+from .loss import ComplexLoss
 
 class SchrödingerDataset(Dataset):
     def __init__(self, seq_len=64, potential_type='harmonic', num_samples=1000):
@@ -30,28 +33,40 @@ class SchrödingerDataset(Dataset):
             V = np.zeros_like(self.x)
             psi = np.sin(np.pi*(self.x+1)/2)
         psi = psi/np.linalg.norm(psi)
+        # Ensure correct shapes [seq_len, 1]
         V = V.astype(np.float32)[:,None]
-        psi=psi.astype(np.float32)[:,None]
+        psi = psi.astype(np.float32)[:,None]
         return V, psi
 
     def __getitem__(self, idx):
         V, psi = self._make_sample()
-        Vc = torch.complex(torch.tensor(V), torch.zeros_like(torch.tensor(V)))
-        ψc = torch.complex(torch.tensor(psi), torch.zeros_like(torch.tensor(psi)))
-        return Vc, ψc
+        return torch.tensor(V), torch.tensor(psi)
 
 class Trainer:
     def __init__(self, model, ops, train_dataset, val_dataset, lr=1e-3, batch_size=32, seq_len=64):
         self.model = model
-        self.ops   = ops
+        self.ops = ops
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model.to(self.device)
-        self.opt   = torch.optim.Adam(self.model.parameters(), lr=lr)
-        self.crit  = nn.MSELoss()
-        self.bs    = batch_size
+        self.opt = torch.optim.Adam(self.model.parameters(), lr=lr)
+        self.crit = ComplexLoss(concept_graph=model.concept_graph, alpha=0.1, beta=0.01)
+        self.bs = batch_size
         self.x_tensor = torch.linspace(-1, 1, seq_len).to(self.device)
-        self.train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-        self.val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=collate_fn)
+        
+        # Use num_workers=0 to avoid multiprocessing issues with memory-mapped files
+        self.train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size, 
+            shuffle=True, 
+            collate_fn=collate_fn,
+            num_workers=0
+        )
+        self.val_loader = DataLoader(
+            val_dataset, 
+            batch_size=batch_size, 
+            collate_fn=collate_fn,
+            num_workers=0
+        )
         self.train_dataset = train_dataset
         self.scheduler = ReduceLROnPlateau(self.opt, 'min', patience=3, factor=0.5)
         self.early_stop_patience = 5
@@ -74,12 +89,14 @@ class Trainer:
             for batch_idx, (V, ψ) in enumerate(self.train_loader, 1):
                 self.opt.zero_grad()
                 ψ_pred = self.model(V.to(self.device), self.ops)
-                loss = self.crit(torch.abs(ψ_pred), torch.abs(ψ.to(self.device)))
+                if not ψ.is_complex():
+                    ψ = torch.complex(ψ, torch.zeros_like(ψ))
+                loss = self.crit(ψ_pred, ψ.to(self.device))
                 loss.backward()
                 self.opt.step()
                 train_loss += loss.item() * V.size(0)
 
-                # Mini progress bar for batches (optional, comment out if too verbose)
+                # Mini progress bar for batches
                 print(f"\r\033[94m  🏃 Training batch {batch_idx}/{num_batches} "
                       f"[{'█' * int(20 * batch_idx / num_batches):20}]",
                       end='', flush=True)
@@ -129,10 +146,12 @@ class Trainer:
         total = 0.0
         with torch.no_grad():
             for V, ψ in loader:
-                    V, ψ = V.to(self.device), ψ.to(self.device)
-                    ψ_pred = self.model(V, self.ops)
-                    loss = self.crit(torch.abs(ψ_pred), torch.abs(ψ))
-                    total += loss.item() * V.size(0)
+                V, ψ = V.to(self.device), ψ.to(self.device)
+                ψ_pred = self.model(V, self.ops)
+                if not ψ.is_complex():
+                    ψ = torch.complex(ψ, torch.zeros_like(ψ))
+                loss = self.crit(ψ_pred, ψ)
+                total += loss.item() * V.size(0)
         return total / len(loader.dataset)
             
     def self_learning(self, threshold=1e-3, num_samples=500):
@@ -184,11 +203,11 @@ def estimate_energy(ψ: torch.Tensor, V: torch.Tensor) -> torch.Tensor:
     the expectation value of the Hamiltonian.
     
     Args:
-        ψ: [B, 1, N] complex tensor, wavefunction predictions
-        V: [B, 1, N] complex tensor, potential energy function
+        ψ: [B, 1, N] tensor, wavefunction predictions
+        V: [B, 1, N] tensor, potential energy function
     
     Returns:
-        E_est: [B, 1] real tensor, estimated energy per sample
+        E_est: [B, 1] tensor, estimated energy per sample
     """
     # Finite difference: second derivative approximation (central difference)
     d2ψ = ψ[:, :, 2:] - 2 * ψ[:, :, 1:-1] + ψ[:, :, :-2]
@@ -199,8 +218,8 @@ def estimate_energy(ψ: torch.Tensor, V: torch.Tensor) -> torch.Tensor:
     Hψ = -0.5 * d2ψ + V_mid * ψ_mid
 
     # Compute expectation value: ⟨ψ|H|ψ⟩ / ⟨ψ|ψ⟩
-    num = torch.sum(torch.real(torch.conj(ψ_mid) * Hψ), dim=2)  # [B, 1]
-    denom = torch.sum(torch.real(torch.conj(ψ_mid) * ψ_mid), dim=2)  # [B, 1]
+    num = torch.sum(ψ_mid * Hψ, dim=2)  # [B, 1]
+    denom = torch.sum(ψ_mid * ψ_mid, dim=2)  # [B, 1]
 
     E_est = num / denom  # [B, 1]
     return E_est
@@ -217,6 +236,13 @@ def collate_fn(batch):
         Vs, psis = zip(*batch)
         V = torch.stack(Vs)
         psi = torch.stack(psis)
+    
+    # Ensure correct shapes [batch_size, seq_len, 1]
+    if V.dim() == 2:
+        V = V.unsqueeze(-1)
+    if psi.dim() == 2:
+        psi = psi.unsqueeze(-1)
+        
     return V, psi
 
 def main():
@@ -237,37 +263,76 @@ def main():
         val_dataset = SchrödingerDataset(seq_len=64, num_samples=500)
 
     config = ModelConfig(
-        input_dim=64,  # Match sequence length of SchrödingerDataset
-        output_dim=1,  # We're predicting a single wavefunction
-        num_heads=8,   # Now head_dim will be 64/8 = 8, which is good
-        mlp_dim=256,
-        num_layers=4,
-        device='cpu',
-        dtype='complex64'
+        input_dim=1,       # Input dimension (single value per timestep)
+        output_dim=1,      # Output dimension (single wavefunction value)
+        num_heads=8,       # Number of attention heads
+        num_layers=4,      # Number of transformer layers
+        d_model=64,        # Model dimension
+        d_ff=256,          # Feed-forward dimension
+        max_seq_len=64,    # Maximum sequence length
+        dropout=0.1,       # Dropout rate
+        device='cpu',      # Device to run on
+        precision=PrecisionLevel.FP8,  # Use FP8 precision
+        concept_graph_size=1000,  # Maximum number of concepts
+        enabled_plugins=[]  # No longer needed as plugins are built-in
     )
-    silly = SillyAI(config)
-    silly.optimize_for_cpu()
-    silly.optimize_for_low_memory()
-
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, collate_fn=collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=32, collate_fn=collate_fn)
+    
+    # Initialize ops and model
+    ops = MultivectorOps()
+    model = SillyAI(config, ops=ops)
+    
+    # Add shape validation
+    def validate_shapes(V, ψ):
+        batch_size = V.size(0)
+        seq_len = V.size(1)
+        if V.size(2) != 1 or ψ.size(2) != 1:
+            raise ValueError(f"Expected input and output to have dimension 1, got V: {V.size(2)}, ψ: {ψ.size(2)}")
+        if seq_len != config.max_seq_len:
+            raise ValueError(f"Expected sequence length {config.max_seq_len}, got {seq_len}")
+        return V, ψ
+    
+    # Update collate_fn to ensure correct shapes
+    def collate_fn(batch):
+        """Custom collate function that handles both in-memory and memory-mapped data"""
+        if isinstance(batch[0][0], np.ndarray):
+            # Memory-mapped numpy arrays
+            Vs, psis = zip(*batch)
+            V = torch.from_numpy(np.stack(Vs))
+            psi = torch.from_numpy(np.stack(psis))
+        else:
+            # Regular PyTorch tensors
+            Vs, psis = zip(*batch)
+            V = torch.stack(Vs)
+            psi = torch.stack(psis)
+        
+        # Ensure correct shapes [batch_size, seq_len, 1]
+        if V.dim() == 2:
+            V = V.unsqueeze(-1)
+        if psi.dim() == 2:
+            psi = psi.unsqueeze(-1)
+            
+        return validate_shapes(V, psi)
+    
+    trainer = Trainer(model, ops, train_dataset, val_dataset, lr=1e-3, batch_size=32, seq_len=64)
     
     # Load existing weights if found
     if os.path.exists("sillyai_model.pt.gz"):
         try:
-            # Attempt to load with different strategies
-            if silly.load("sillyai_model.pt.gz"):
+            if model.load("sillyai_model.pt.gz"):
                 print("\033[92m💾 Loaded full model snapshot\033[0m")
             else:
                 print("\033[91m⚠️ Couldn't load model\033[0m")
         except Exception as e:
             print(f"\033[91m⚠️ Critical loading error: {e}\033[0m")
 
-    silly.fit(train_loader, val_loader, epochs=10, early_stop=5)
-    silly.print_concepts(top_k=10)
+    # Train the model
+    trainer.train(epochs=10)
+    
+    # Print top concepts
+    model.print_concepts(top_k=10)
 
-    # Optionally: generate bytecode from concept graph and print
-    bytecode = silly.generate_bytecode()
+    # Generate and print example bytecode
+    bytecode = model.generate_bytecode()
     print("[SillyAI] Example bytecode from concept graph:")
     for idx, (op, args) in enumerate(bytecode):
         print(f"  {idx:03d}: {op} {args}")

@@ -5,22 +5,21 @@ from enum import Enum
 from collections import deque, defaultdict
 from dataclasses import dataclass
 
+from .config import PrecisionLevel
+
 # Quantizer with real/cartesian/polar, sync+async entrypoints, JIT/compile-ready
 class Quantizer(nn.Module):
-    def __init__(self, qmin, qmax, init_scale=1.0, mode="real", wrap_phase=True):
+    def __init__(self, qmin, qmax, init_scale=1.0, mode="real"):
         super().__init__()
         self.qmin, self.qmax, self.mode = qmin, qmax, mode
         self.scale = nn.Parameter(torch.tensor(init_scale))
         self.zero_point = nn.Parameter(torch.tensor(0.0))
-        self.wrap_phase = wrap_phase
         print("[Quantizer] I got initialized successfully! :D")
 
     def forward(self, x):
         if self.mode == "real":
             return self._qs(x)[0]
-        r, i = (x.real, x.imag) if self.mode == "cartesian" else (x.abs(), x.angle())
-        if self.mode == "polar" and self.wrap_phase:
-            i = (i + torch.pi) % (2 * torch.pi) - torch.pi
+        r, i = x.real, x.imag
         qr, qi = self._qs(r)[0], self._qs(i)[0]
         return (qr, qi)
 
@@ -39,11 +38,6 @@ class Quantizer(nn.Module):
             torch.round(x / self.scale + self.zero_point), self.qmin, self.qmax
         )
         return (q,)
-
-
-# Mixed precision router
-class PrecisionLevel(Enum):
-    TERNARY, INT4, FP4, FP8, FP16 = range(1, 6)
 
 
 @dataclass
@@ -118,7 +112,7 @@ class TensorCache:
         lvl = self.mpr.get_precision(tp)
         cfg = PRECISION_CONFIGS[lvl]
         if not self.quant or self.quant.qmin != cfg.qmin:
-            self.quant = Quantizer(cfg.qmin, cfg.qmax, mode="polar")
+            self.quant = Quantizer(cfg.qmin, cfg.qmax, mode="real")
         q = self.quant(tp) if self.quant.mode != "real" else (self.quant(tp),)
         if tp.is_cuda:
             q = tuple(x.cpu() for x in q)

@@ -5,12 +5,23 @@ import threading
 from concurrent.futures import ProcessPoolExecutor
 from functools import lru_cache
 from collections import deque
+import sys
+from datetime import datetime
+from threading import Lock
+from typing import Union, List, Tuple
+import bisect
+
 from datasets import Dataset
 
 import torch
 from torch.utils.data import IterableDataset
 import numpy as np
 
+# ANSI color codes for Windows/Unix
+BLUE = '\033[94m'
+YELLOW = '\033[93m'
+RED = '\033[91m'
+RESET = '\033[0m'
 CACHE_DIR = "cache_chunks"
 CHUNK_SIZE = 1_000   # windows per chunk
 NPZ_EXT    = ".npz"
@@ -75,53 +86,46 @@ class AsyncInit:
 
 
 class ChunkedMMapDataset(Dataset):
-    """
-    Random-access dataset over memory-mapped .npz chunks with async prefetching.
-    Compatible with both cached npz files and dynamically generated Schrödinger data.
+    """Dataset that loads data from memory-mapped files in chunks."""
     
-    Args:
-        cache_dir (str): Directory containing .npz chunks
-        prefetch_size (int): Number of chunks to prefetch
-        max_cache_size (int): Maximum number of chunks to keep in memory
-        fallback_samples (int): Number of samples to generate if no cache exists
-        seq_len (int): Sequence length for generated samples
-        potential_type (str): Type of potential for generated samples
-    """
-    def __init__(self, cache_dir=CACHE_DIR, prefetch_size=3, max_cache_size=5,
-                 fallback_samples=1000, seq_len=64, potential_type='harmonic'):
+    def __init__(self, cache_dir: str, chunk_size: int = 1000):
         self.cache_dir = cache_dir
-        self.prefetch_size = prefetch_size
-        self.max_cache_size = max_cache_size
-        self.seq_len = seq_len
-        self.potential_type = potential_type
-        self.fallback_samples = fallback_samples
+        self.chunk_size = chunk_size
+        self.chunks = []
+        self.chunk_offsets = [0]
         
-        # Try to use cached data first
-        if os.path.exists(cache_dir):
-            self.chunk_files = sorted(f for f in os.listdir(cache_dir) if f.endswith(NPZ_EXT))
-            if self.chunk_files:
-                self.use_cache = True
-                self.cache_lock = threading.Lock()
-                self.chunk_cache = {}
-                self.access_times = {}
+        # Find all chunk files
+        for f in os.listdir(cache_dir):
+            if f.endswith('.npy'):
+                chunk_path = os.path.join(cache_dir, f)
+                self.chunks.append(np.load(chunk_path, mmap_mode='r'))
+                self.chunk_offsets.append(self.chunk_offsets[-1] + len(self.chunks[-1]))
                 
-                # Build index synchronously first
-                self._build_index()
-                
-                # Initialize async components in a thread-safe way
-                self.loop = get_or_create_loop()
-                self.prefetch_queue = asyncio.Queue(maxsize=prefetch_size)
-                self.prefetch_task = None
-                self.is_closing = False
-
-                # Start prefetching
-                self._start_prefetching()
-                return
-                
-        # Fallback to dynamic generation like SchrödingerDataset
-        self.use_cache = False
-        self.total = fallback_samples
-        self.x = np.linspace(-1, 1, seq_len).astype(np.float32)
+        self.total_size = self.chunk_offsets[-1]
+        
+    def __len__(self) -> int:
+        return self.total_size
+        
+    def __getitem__(self, idx: Union[int, List[int]]) -> Union[Tuple[torch.Tensor, torch.Tensor], List[Tuple[torch.Tensor, torch.Tensor]]]:
+        if isinstance(idx, list):
+            # Handle batch indices
+            return [self._get_single_item(i) for i in idx]
+        return self._get_single_item(idx)
+        
+    def _get_single_item(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Get a single item from the dataset."""
+        if not 0 <= idx < self.total_size:
+            raise IndexError(f"Index {idx} out of range [0, {self.total_size})")
+            
+        # Find which chunk contains this index
+        chunk_idx = bisect.bisect_right(self.chunk_offsets, idx) - 1
+        local_idx = idx - self.chunk_offsets[chunk_idx]
+        
+        # Get data from chunk
+        chunk = self.chunks[chunk_idx]
+        V, psi = chunk[local_idx]
+        
+        return torch.tensor(V), torch.tensor(psi)
 
     def _build_index(self):
         """Build the chunk index synchronously"""
@@ -278,23 +282,31 @@ class ChunkedMMapDataset(Dataset):
         return Vc, ψc
 
     def __getitem__(self, idx):
+        # Only accept a single integer index
+        if not isinstance(idx, (int, np.integer)):
+            raise TypeError(f"ChunkedMMapDataset only supports integer indices, got {type(idx)}: {idx}")
+        return self._get_single_item(idx)
+
+    def _get_single_item(self, idx):
+        """Helper method to get a single item by integer index"""
+        if not isinstance(idx, (int, np.integer)):
+            raise TypeError(f"Index must be integer, got {type(idx)}")
+
         if not self.use_cache:
             if idx < 0 or idx >= self.total:
                 raise IndexError(f"Index {idx} out of bounds")
             return self._make_sample()
-            
+        
         if idx < 0 or idx >= self.total:
             raise IndexError(f"Index {idx} out of bounds")
-            
-        # Find which chunk contains this index
+
         chunk_idx = np.searchsorted(self.cum_lens[1:], idx, side='right')
         offset = idx - self.cum_lens[chunk_idx]
         
-        # Get the chunk data
         chunk_data = self._get_chunk_sync(chunk_idx)
         if chunk_data is None:
             raise RuntimeError(f"Failed to load chunk {chunk_idx}")
-            
+
         return chunk_data[offset]
 
     def __len__(self):
@@ -490,3 +502,48 @@ class IterableMMapDataset(IterableDataset):
         
     def __del__(self):
         self.close()
+
+class Logger:
+    def __init__(self, logfile='debug.log'):
+        self.logfile = logfile
+        self.lock = Lock()
+
+    def clear_log(self):
+        """Overwrite the log file (clear contents)."""
+        with self.lock:
+            with open(self.logfile, 'w', encoding='utf-8') as f:
+                f.write('')
+
+    def _write(self, msg):
+        with self.lock:
+            with open(self.logfile, 'a', encoding='utf-8') as f:
+                f.write(msg + '\n')
+
+    def log(self, component, method, msg, level='info'):
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        prefix = f'({timestamp}) [{component}::{method}]'
+        color = {'info': BLUE, 'warning': YELLOW, 'error': RED}.get(level, '')
+        reset = RESET if color else ''
+        formatted = f'{prefix} {msg}'
+        # Print colored to console
+        print(f'{color}{formatted}{reset}', file=sys.stderr if level=='error' else sys.stdout)
+        # Write plain to log file
+        self._write(formatted)
+
+    def info(self, component, method, msg):
+        self.log(component, method, msg, 'info')
+    def warning(self, component, method, msg):
+        self.log(component, method, msg, 'warning')
+    def error(self, component, method, msg):
+        self.log(component, method, msg, 'error')
+
+def log_tensor(tensor, op_name, component="TensorOp", method=""): 
+    """Log tensor operation, shape, dtype, and device."""
+    if isinstance(tensor, torch.Tensor):
+        logger.info(component, method or op_name, f"{op_name}: shape={tuple(tensor.shape)}, dtype={tensor.dtype}, device={tensor.device}")
+    elif isinstance(tensor, (tuple, list)):
+        for i, t in enumerate(tensor):
+            if isinstance(t, torch.Tensor):
+                logger.info(component, method or op_name, f"{op_name}[{i}]: shape={tuple(t.shape)}, dtype={t.dtype}, device={t.device}")
+
+logger = Logger()

@@ -6,7 +6,7 @@ This is a sketchbook on implementation plans and notes for SillyAI and SillyISA 
 
 ## SillyAI
 
-Currently, SillyAI is practically fully implemented. It just needs real-world testing and validation. It could use additional/better plugin support and a context window but that's not the priority right now.
+Currently, SillyAI is practically fully implemented. It just needs real-world testing and validation. It could use additional/better plugin support but that's not the priority right now.
 
 ## SillyVM
 

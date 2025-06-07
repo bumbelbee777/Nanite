@@ -6,8 +6,11 @@ from typing import Optional, List, Dict, Union, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import weakref
+import math
 
 from .ops import *
+from .config import ModelConfig
 
 def complex_checkpoint(function, *args):
     """Checkpointing wrapper that handles complex tensors"""
@@ -47,16 +50,17 @@ class TaskComplexityEstimator(nn.Module):
     ):
         """
         threshold: any multivector component with |value| > threshold
-                   counts as “active” toward complexity.
+                   counts as "active" toward complexity.
         """
         super().__init__()
         self.threshold = threshold
         self.eps       = eps
         self.use_fft   = use_fft
-        
-        # Complex feature extraction layers
-        self.feature_net = ComplexMLP(4, 1, feature_dim)
-        
+        from .config import ModelConfig
+        from .ops import MultivectorOps
+        # Minimal config for feature_net: input_dim=4, mlp_dim=feature_dim, output_dim=1
+        feature_config = ModelConfig(input_dim=4, mlp_dim=feature_dim, output_dim=1, num_heads=1, num_layers=1, dropout=0.0)
+        self.feature_net = ComplexMLP(feature_config, MultivectorOps())
         # JIT compile expensive computations
         self.get_spectral_norm = torch.jit.script(self._get_spectral_norm)
         self.get_rank_estimate = torch.jit.script(self._get_rank_estimate)
@@ -176,11 +180,12 @@ class FeatureRouter(nn.Module):
         self.d_model = d_model
         self.hidden = hidden_dim or (d_model // 2)
         self.threshold = threshold
-        
         self.estimator = estimator or TaskComplexityEstimator()
-        
-        # Complex MLP for routing
-        self.complex_mlp = ComplexMLP(2, 1, self.hidden)
+        from .config import ModelConfig
+        from .ops import MultivectorOps
+        # Minimal config for router: input_dim=2, mlp_dim=hidden, output_dim=1
+        router_config = ModelConfig(input_dim=2, mlp_dim=self.hidden, output_dim=1, num_heads=1, num_layers=1, dropout=0.0)
+        self.complex_mlp = ComplexMLP(router_config, MultivectorOps())
 
     async def forward(self, mv: torch.Tensor, ops: Optional[MultivectorOps] = None) -> torch.Tensor:
         """
@@ -247,35 +252,77 @@ class ComplexDropout(nn.Module):
 class LayerNorm(nn.Module):
     def __init__(self, dim, eps=1e-5):
         super().__init__()
-        self.ln_r = nn.LayerNorm(dim, eps)
-        self.ln_i = nn.LayerNorm(dim, eps)
+        self.dim = dim
+        self.eps = eps
+        # Initialize with the correct normalized shape - just normalize over the last dimension
+        self.ln_r = nn.LayerNorm(dim, eps=eps)  # Changed to normalize over last dimension only
+        self.ln_i = nn.LayerNorm(dim, eps=eps)  # Changed to normalize over last dimension only
 
     def forward(self, x: torch.Tensor):
-        return torch.complex(self.ln_r(x.real), self.ln_i(x.imag))
+        # Handle both real and complex inputs
+        if not x.is_complex():
+            x = torch.complex(x, torch.zeros_like(x))
+            
+        # Get input shape
+        batch_size, seq_len, dim = x.shape
+        
+        # Ensure we're normalizing over the correct dimension
+        if dim != self.dim:
+            raise ValueError(f"Expected input dimension {self.dim}, but got {dim}")
+            
+        # Reshape to [batch_size * seq_len, dim] for normalization
+        x_reshaped = x.reshape(-1, dim)
+        
+        # Apply layer norm to real and imaginary parts separately
+        real_norm = self.ln_r(x_reshaped.real)
+        imag_norm = self.ln_i(x_reshaped.imag)
+        
+        # Reshape back to original shape
+        real_norm = real_norm.reshape(batch_size, seq_len, dim)
+        imag_norm = imag_norm.reshape(batch_size, seq_len, dim)
+        
+        return torch.complex(real_norm, imag_norm)
 
 class LinearLayer(nn.Module):
-    def __init__(self, in_dim, out_dim, rank=None):
+    def __init__(self, in_dim: int, out_dim: int):
         super().__init__()
-        r = rank or min(in_dim, out_dim) // 2
-        self.A = nn.Parameter(torch.randn(in_dim, r, dtype=torch.complex64)*.02)
-        self.B = nn.Parameter(torch.randn(r, out_dim, dtype=torch.complex64)*.02)
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        
+        # Initialize weights with proper scaling
+        # Note: weight shape is [in_features, out_features] for F.linear
+        self.weight = nn.Parameter(torch.randn(in_dim, out_dim, dtype=torch.complex64) * 0.02)
         self.bias = nn.Parameter(torch.zeros(out_dim, dtype=torch.complex64))
-        print("[LinearLayer] I got initialized successfully! :D")
-
-    def forward(self, x, ops):
-        o = x.view(-1, x.size(-1))
-        m = ops.matmul_sync(o, self.A)
-        y = ops.matmul_sync(m, self.B)
-        return (y + self.bias).view(*x.shape[:-1], -1)
+        
+    def forward(self, x: torch.Tensor, ops: Optional[MultivectorOps] = None) -> torch.Tensor:
+        if ops is None:
+            ops = MultivectorOps()
+            
+        # Ensure input is complex
+        if not x.is_complex():
+            x = torch.complex(x, torch.zeros_like(x))
+            
+        # Handle batched inputs correctly
+        if x.dim() > 2:
+            batch_shape = x.shape[:-1]
+            x_reshaped = x.reshape(-1, x.shape[-1])
+            # F.linear expects weight shape [out_features, in_features]
+            out = F.linear(x_reshaped, self.weight.t(), self.bias)
+            return out.reshape(*batch_shape, -1)
+        else:
+            return F.linear(x, self.weight.t(), self.bias)
 
 class ComplexInputProjection(nn.Module):
-    def __init__(self, in_dim, out_dim):
+    def __init__(self, config, ops):
         super().__init__()
-        self.linear = LinearLayer(in_dim, out_dim)
-        self.norm = LayerNorm(out_dim)
-        self.act = ComplexPReLU(out_dim)
+        self.config = config
+        self.ops = ops
+        self.linear = LinearLayer(in_dim=1, out_dim=config.input_dim)
+        self.norm = LayerNorm(config.input_dim)
+        self.act = ComplexPReLU(config)
 
-    def forward(self, x: torch.Tensor, ops: Optional[MultivectorOps] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, ops=None) -> torch.Tensor:
+        ops = ops or self.ops
         if ops is None:
             ops = MultivectorOps()
             
@@ -284,18 +331,19 @@ class ComplexInputProjection(nn.Module):
             x = torch.complex(x, torch.zeros_like(x))
             
         # Project using complex linear layer
-        x = self.linear(x, ops)
+        x = self.linear(x, ops=ops)
         x = self.norm(x)
         return self.act(x)
     
 class PositionalEncoding(nn.Module):
-    def __init__(self, embed_dim, max_len=5000):
+    def __init__(self, config: ModelConfig):
         super().__init__()
-        self.embed_dim = embed_dim
-        self.max_len = max_len
+        self.config = config
+        self.d_model = config.d_model
+        self.max_len = config.max_seq_len
         
-        # Create geometric progression of frequencies for complex embeddings
-        freqs = 1.0 / (10000 ** (torch.arange(0, embed_dim, dtype=torch.float32) / embed_dim))
+        # Create geometric progression of frequencies for embeddings
+        freqs = 1.0 / (10000 ** (torch.arange(0, self.d_model, dtype=torch.float32) / self.d_model))
         self.register_buffer('freqs', freqs)
         print(f"[PositionalEncoding] I got initialized successfully with geometric frequencies: min={freqs.min().item():.5f}, max={freqs.max().item():.5f}! :D")
 
@@ -324,26 +372,26 @@ class PositionalEncoding(nn.Module):
         return ops.matmul_sync(x, encoding)
 
 class ComplexPReLU(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, config_or_dim):
         super().__init__()
-        self.pos_weight = nn.Parameter(torch.ones(dim))
-        self.neg_weight = nn.Parameter(torch.ones(dim) * 0.25)
+        if hasattr(config_or_dim, 'input_dim'):
+            input_dim = config_or_dim.input_dim
+        else:
+            input_dim = int(config_or_dim)
+        self.input_dim = input_dim
+        self.pos_weight = nn.Parameter(torch.ones(input_dim))
+        self.neg_weight = nn.Parameter(torch.ones(input_dim) * 0.25)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         r = torch.abs(z)
         phi = torch.angle(z)
-
-        # Vectorized positive/negative split on magnitude
-        # PReLU applies pos_weight when r>0 else neg_weight (which is rare because magnitude>=0)
-        # We can just do: r_out = torch.where(r > 0, pos_weight * r, neg_weight * r)
-        # But since r is always >=0, neg part is effectively zero, so use clamp for numerical stability
         r_out = self.pos_weight * r
-
         return r_out * torch.exp(1j * phi)
 
 class DynamicActivation(nn.Module):
     def __init__(self, dim):
         super().__init__()
+        self.dim = dim
         self.cprelu = ComplexPReLU(dim)
         self.alpha = nn.Parameter(torch.ones(1, dtype=torch.complex64))
         self.beta = nn.Parameter(torch.zeros(1, dtype=torch.complex64))
@@ -356,112 +404,38 @@ class DynamicActivation(nn.Module):
         return self.dropout(scaled)
 
 class InfiniToeplitz(nn.Module):
-    def __init__(self, embed_dim, num_heads, key_structure='toeplitz', value_structure='circulant', concept_graph=None):
+    def __init__(self, config: ModelConfig, ops: MultivectorOps):
         super().__init__()
-        
-        # Validate dimensions
-        if embed_dim < num_heads:
-            raise ValueError(f"embed_dim ({embed_dim}) must be >= num_heads ({num_heads})")
-        if embed_dim % num_heads != 0:
-            raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})")
-            
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        self.key_structure = key_structure
-        self.value_structure = value_structure
-        self.concept_graph = concept_graph
+        self.config = config
+        self.ops = ops
+        self.num_heads = config.num_heads
+        self.head_dim = config.d_model // config.num_heads
 
         # Projection layers for Q, K, V
-        self.q_proj = LinearLayer(embed_dim, embed_dim)
-        self.k_proj = LinearLayer(embed_dim, embed_dim)
-        self.v_proj = LinearLayer(embed_dim, embed_dim)
+        self.q_proj = LinearLayer(config.d_model, config.d_model)
+        self.k_proj = LinearLayer(config.d_model, config.d_model)
+        self.v_proj = LinearLayer(config.d_model, config.d_model)
 
         # Initialize structured matrix parameters and gates
         self.key_params = nn.ParameterList()
         self.value_params = nn.ParameterList()
-        self.key_gate = nn.Parameter(torch.ones(num_heads, 1, dtype=torch.float32) * 0.5)
-        self.value_gate = nn.Parameter(torch.ones(num_heads, 1, dtype=torch.float32) * 0.5)
+        self.key_gate = nn.Parameter(torch.ones(config.num_heads, 1, dtype=torch.float32) * 0.5)
+        self.value_gate = nn.Parameter(torch.ones(config.num_heads, 1, dtype=torch.float32) * 0.5)
 
-        for _ in range(num_heads):
-            if key_structure == 'toeplitz':
-                key_param = torch.randn(2 * self.head_dim - 1, dtype=torch.complex64) * 0.02
-            elif key_structure == 'circulant':
-                key_param = torch.randn(self.head_dim, dtype=torch.complex64) * 0.02
+        for _ in range(config.num_heads):
+            # Initialize key parameters
+            key_param = torch.randn(self.head_dim, dtype=torch.complex64) * 0.02
             self.key_params.append(nn.Parameter(key_param))
 
-            if value_structure == 'circulant':
-                value_param = torch.randn(self.head_dim, dtype=torch.complex64) * 0.02
+            # Initialize value parameters
+            value_param = torch.randn(self.head_dim, dtype=torch.complex64) * 0.02
             self.value_params.append(nn.Parameter(value_param))
 
         # Output projection
-        self.out_proj = LinearLayer(embed_dim, embed_dim)
-        self.norm_q = LayerNorm(embed_dim)
-        self.norm_k = LayerNorm(embed_dim)
-        self.norm_v = LayerNorm(embed_dim)
-
-        print(f"[InfiniToeplitz] I got initialized successfully with {num_heads} heads, key: {key_structure}, value: {value_structure}! :D")
-
-    def _project_key_update(self, x, output_dim):
-        """
-        Projects complex-valued input to target dimension using FFT-based method
-        Args:
-            x: complex-valued tensor [..., input_dim]
-            output_dim: target output dimension
-        Returns:
-            complex-valued tensor [..., output_dim]
-        """
-        # Ensure input is properly shaped [..., features]
-        if x.dim() == 1:
-            x = x.unsqueeze(0)
-        
-        # Get original feature dimension
-        input_dim = x.size(-1)
-        
-        # Split into real and imaginary components
-        x_real, x_imag = x.real, x.imag
-        
-        # Pad or truncate to target dimension
-        if output_dim > input_dim:
-            pad_size = output_dim - input_dim
-            x_real_pad = F.pad(x_real, (0, pad_size))
-            x_imag_pad = F.pad(x_imag, (0, pad_size))
-        else:
-            x_real_pad = x_real[..., :output_dim]
-            x_imag_pad = x_imag[..., :output_dim]
-        
-        # Generate random projection matrix (real-valued)
-        rand_matrix = torch.randn(output_dim, device=x.device)
-        
-        # Process real component
-        x_real_fft = torch.fft.rfft(x_real_pad)
-        rand_fft = torch.fft.rfft(rand_matrix)
-        min_dim = min(x_real_fft.size(-1), rand_fft.size(-1))
-        proj_real = torch.fft.irfft(x_real_fft[..., :min_dim] * rand_fft[..., :min_dim], n=output_dim)
-        
-        # Process imaginary component
-        x_imag_fft = torch.fft.rfft(x_imag_pad)
-        proj_imag = torch.fft.irfft(x_imag_fft[..., :min_dim] * rand_fft[..., :min_dim], n=output_dim)
-        
-        # Combine back into complex tensor
-        return torch.complex(proj_real, proj_imag)
-
-    def _toeplitz_matmul(self, x, t):
-        # x: [batch, head_dim], t: [2*head_dim-1]
-        n = self.head_dim
-        
-        # Pad input to length m+n-1 for linear convolution
-        x_padded = F.pad(x, (0, n-1))
-        
-        # Pad Toeplitz matrix diagonal to same length
-        t_padded = F.pad(t, (0, x_padded.size(-1) - t.size(-1)))
-        
-        # FFT multiplication
-        X = torch.fft.fft(x_padded)
-        T = torch.fft.fft(t_padded)
-        product = torch.fft.ifft(X * T)[..., :n]  # Keep only valid part
-        
-        return product
+        self.out_proj = LinearLayer(config.d_model, config.d_model)
+        self.norm_q = LayerNorm(config.d_model)
+        self.norm_k = LayerNorm(config.d_model)
+        self.norm_v = LayerNorm(config.d_model)
 
     def _circulant_matmul(self, x, c):
         """Handles both real and complex inputs with proper output dtype"""
@@ -481,243 +455,243 @@ class InfiniToeplitz(nn.Module):
         # Ensure output matches input dtype
         return out.to(x.dtype)
 
-    def forward(self, x, ops, tokens=None):
-        batch_size, seq_len, _ = x.shape[:3]
+    def forward(self, x, ops=None, tokens=None):
+        ops = ops or self.ops
+        batch_size, seq_len, _ = x.shape
+        
+        # Project and normalize
         q = self.q_proj(self.norm_q(x), ops)
         k = self.k_proj(self.norm_k(x), ops)
         v = self.v_proj(self.norm_v(x), ops)
+        
+        # Reshape for multi-head attention
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        
+        # Initialize states
         key_state = [param.clone().expand(batch_size, -1) for param in self.key_params]
         value_state = [param.clone().expand(batch_size, -1) for param in self.value_params]
+        
         outputs = []
         for i in range(seq_len):
             q_i = q[:, :, i, :]
             k_i = k[:, :, i, :]
             v_i = v[:, :, i, :]
             head_outputs = []
+            
             for h in range(self.num_heads):
                 # Update states
-                if self.key_structure == 'toeplitz':
-                    delta_k = self._project_key_update(k_i[:, h], 2*self.head_dim-1)
-                else:  # circulant
-                    delta_k = k_i[:, h]
+                delta_k = k_i[:, h]
                 key_state[h] = (1 - self.key_gate[h]) * key_state[h] + self.key_gate[h] * delta_k
-                if self.value_structure == 'circulant':
-                    delta_v = v_i[:, h]
-                    value_state[h] = (1 - self.value_gate[h]) * value_state[h] + self.value_gate[h] * delta_v
-                # Compute attention
-                if self.key_structure == 'toeplitz':
-                    attn = self._toeplitz_matmul(q_i[:, h], key_state[h])
-                else:
-                    attn = self._circulant_matmul(q_i[:, h], key_state[h])
+                
+                delta_v = v_i[:, h]
+                value_state[h] = (1 - self.value_gate[h]) * value_state[h] + self.value_gate[h] * delta_v
+                
+                # Compute attention using circulant multiplication
+                attn = self._circulant_matmul(q_i[:, h], key_state[h])
                 attn_scores = torch.complex(
                     F.softmax(attn.real, dim=-1),
                     torch.zeros_like(attn.real)
                 )
-                # --- Nuanced Concept Extraction & Relationships ---
-                if self.concept_graph is not None and tokens is not None:
-                    token_id = tokens[:, i] if tokens.dim() == 2 else None
-                    if token_id is not None:
-                        for b in range(batch_size):
-                            cname = f"token_{int(token_id[b])}"
-                            # Add concept and associate embedding
-                            self.concept_graph.add_concept(cname)
-                            self.concept_graph.associate_token(cname, int(token_id[b]), embedding=k_i[b, h].detach())
-                            # Extract top attended neighbors for richer relationships
-                            attn_vals = attn_scores[b].real.detach().cpu().numpy()
-                            top_indices = attn_vals.argsort()[-3:][::-1]  # top 3 attended
-                            for idx in top_indices:
-                                if idx == b:  # skip self
-                                    continue
-                                neighbor_token = tokens[b, idx] if tokens.dim() == 2 else None
-                                if neighbor_token is not None:
-                                    nname = f"token_{int(neighbor_token)}"
-                                    # Add/strengthen edge with relationship type
-                                    rel_type = "attention" if attn_vals[idx] > 0.5 else "co-occurrence"
-                                    confidence = float(attn_vals[idx])
-                                    self.concept_graph.add_concept(nname)
-                                    self.concept_graph.add_edge(cname, nname, weight=confidence, relationship=rel_type, confidence=confidence)
-                # --- Advanced Energy Update ---
-                if self.concept_graph is not None and tokens is not None:
-                    for b in range(batch_size):
-                        token_id = tokens[b, i] if tokens.dim() == 2 else None
-                        if token_id is not None:
-                            cname = f"token_{int(token_id)}"
-                            c = self.concept_graph.get(cname)
-                            if c is not None:
-                                # Use non-linear bounding for energy
-                                attn_sum = attn_scores[b].real.abs().sum().item()
-                                c.energy = float(torch.tanh(torch.tensor(c.energy + attn_sum)).item() * 10.0)
-                                c.access_count += 1
+                
                 # Compute head output
-                if self.value_structure == 'circulant':
-                    out = self._circulant_matmul(attn_scores, value_state[h])
-                else:
-                    out = attn_scores  # Fallback
+                out = self._circulant_matmul(attn_scores, value_state[h])
                 head_outputs.append(out)
+            
             combined = torch.stack(head_outputs, dim=1)  # [batch, heads, head_dim]
             outputs.append(combined.reshape(batch_size, -1))  # Flatten head dims
+        
         output = torch.stack(outputs, dim=1)  # [batch, seq_len, embed_dim]
-        # --- Propagate and decay energy after each forward pass ---
-        if self.concept_graph is not None:
-            self.concept_graph.propagate_energy()
-            self.concept_graph.decay()
-        return self.out_proj.forward(output, ops)
+        return self.out_proj(output, ops)
 
 class ComplexMLP(nn.Module):
-    def __init__(self, in_dim, out_dim, h_dim):
+    def __init__(self, config, ops):
         super().__init__()
-        self.norm1 = LayerNorm(in_dim)
-        self.norm2 = LayerNorm(h_dim)
-        
-        # Parallel feature pathways
-        self.lin1a = LinearLayer(in_dim, h_dim)
-        self.lin1b = LinearLayer(in_dim, h_dim)
-        self.act = DynamicActivation(h_dim)
-        
-        # Gated residual connection
+        self.config = config
+        self.ops = ops
+        # Use d_model for input/output dimensions
+        self.norm1 = LayerNorm(config.d_model)  # For input normalization
+        self.norm2 = LayerNorm(config.d_ff)    # For intermediate normalization
+        # First linear layer: d_model -> d_ff
+        self.lin1a = LinearLayer(config.d_model, config.d_ff)
+        self.lin1b = LinearLayer(config.d_model, config.d_ff)
+        self.act = DynamicActivation(config.d_ff)
         self.res_gate = nn.Parameter(torch.randn(1, dtype=torch.complex64))
-        self.lin2 = LinearLayer(h_dim, out_dim)
-        self.drop = ComplexDropout(0.3)
-        
-        # Learnable scale parameters
+        # Second linear layer: d_ff -> d_model
+        self.lin2 = LinearLayer(config.d_ff, config.d_model)
+        self.drop = ComplexDropout(config.dropout)
         self.scale = nn.Parameter(torch.ones(1, dtype=torch.float32) * 0.02)
         print("[ComplexMLP] I got initialized successfully! :D")
 
-    def forward(self, x, ops):
-        residual = x
-        x = self.norm1(x)
-        
-        # Parallel feature processing
-        xa = self.lin1a(x, ops)
-        xb = self.lin1b(x, ops)
-        x = self.act(xa * torch.sigmoid(self.res_gate) + xb * (1 - torch.sigmoid(self.res_gate)))
-        
-        x = self.norm2(x)
-        x = self.lin2(x, ops)
-        return self.drop(x * self.scale) + residual
+    def forward(self, x, ops=None):
+        if ops is None:
+            ops = self.ops
+        residual = x  # [batch_size, seq_len, d_model]
+        x = self.norm1(x)  # [batch_size, seq_len, d_model]
+        xa = self.lin1a(x, ops)  # [batch_size, seq_len, d_ff]
+        xb = self.lin1b(x, ops)  # [batch_size, seq_len, d_ff]
+        x = self.act(xa * torch.sigmoid(self.res_gate) + xb * (1 - torch.sigmoid(self.res_gate)))  # [batch_size, seq_len, d_ff]
+        x = self.norm2(x)  # [batch_size, seq_len, d_ff]
+        x = self.lin2(x, ops)  # [batch_size, seq_len, d_model]
+        return self.drop(x * self.scale) + residual  # [batch_size, seq_len, d_model]
 
 class TransformerLayer(nn.Module):
-    def __init__(self, embed_dim, num_heads, mlp_dim, concept_graph=None):
+    def __init__(self, config: ModelConfig, ops: MultivectorOps, concept_graph=None):
         super().__init__()
+        self.config = config
+        self.ops = ops
+        embed_dim = config.d_model
+        num_heads = config.num_heads
+        mlp_dim = config.mlp_dim
         self.attn_norm = LayerNorm(embed_dim)
         self.mlp_norm = LayerNorm(embed_dim)
-        self.attn = InfiniToeplitz(embed_dim, num_heads, concept_graph=concept_graph)
-        self.mlp = ComplexMLP(embed_dim, embed_dim, mlp_dim)
+        self.attn = InfiniToeplitz(config, ops)
+        self.mlp = ComplexMLP(config, ops)
         self.alpha = nn.Parameter(torch.ones(1, dtype=torch.float32) * 0.02)
-        self.drop = ComplexDropout(0.3)
+        self.drop = ComplexDropout(config.dropout)
+        # Store concept_graph directly since it's already a weak reference
         self.concept_graph = concept_graph
         print("[TransformerLayer] I got initialized successfully! :D")
 
-    def forward(self, x, ops, tokens=None):
-        attn_out = self.attn(self.attn_norm(x), ops, tokens=tokens)
+    def forward(self, x: torch.Tensor, ops: Optional[MultivectorOps] = None) -> torch.Tensor:
+        if ops is None:
+            ops = self.ops
+        attn_out = self.attn(self.attn_norm(x), ops)
         x = x + self.drop(attn_out * self.alpha)
         mlp_out = self.mlp(self.mlp_norm(x), ops)
         return x + self.drop(mlp_out * self.alpha)
 
 class Transformer(nn.Module):
-    def __init__(self, num_layers, embed_dim, num_heads, mlp_dim, output_dim=1, concept_graph=None):
+    def __init__(self, config: ModelConfig, ops: Optional[MultivectorOps] = None, concept_graph=None):
         super().__init__()
-        self.input_proj = ComplexInputProjection(in_dim=1, out_dim=embed_dim)
-        self.positional_encoding = PositionalEncoding(embed_dim)
-        self.layers = nn.ModuleList([
-            TransformerLayer(embed_dim, num_heads, mlp_dim, concept_graph=concept_graph)
-            for _ in range(num_layers)
-        ])
-        self.norm = LayerNorm(embed_dim)
-        self.head = LinearLayer(embed_dim, output_dim)
+        self.config = config
+        self.ops = ops or MultivectorOps()
         self.concept_graph = concept_graph
-        print(f"[Transformer] I got initialized successfully with {num_layers} layers and positional encoding! :D")
-
-    def _convert_state_dict(self, state_dict):
-        """Convert old state dict format to new complex-valued format"""
-        new_state = {}
         
-        # Handle input projection conversion
-        if 'input_proj.real_proj.weight' in state_dict:
-            real_w = state_dict['input_proj.real_proj.weight']
-            imag_w = state_dict['input_proj.imag_proj.weight']
-            in_dim, out_dim = real_w.shape
-            # Convert to complex linear params
-            new_state['input_proj.linear.A'] = torch.complex(
-                real_w[:, :out_dim//2], 
-                imag_w[:, :out_dim//2]
-            )
-            new_state['input_proj.linear.B'] = torch.eye(out_dim, dtype=torch.complex64)
-            new_state['input_proj.linear.bias'] = torch.complex(
-                state_dict['input_proj.real_proj.bias'],
-                state_dict['input_proj.imag_proj.bias']
-            )
-            
-            # Convert layer norm params
-            w = state_dict['input_proj.norm.weight']
-            b = state_dict['input_proj.norm.bias']
-            new_state['input_proj.norm.ln_r.weight'] = w
-            new_state['input_proj.norm.ln_r.bias'] = b
-            new_state['input_proj.norm.ln_i.weight'] = w.clone()
-            new_state['input_proj.norm.ln_i.bias'] = b.clone()
-            
-            # Add activation params
-            new_state['input_proj.act.pos_weight'] = torch.ones(out_dim)
-            new_state['input_proj.act.neg_weight'] = torch.ones(out_dim) * 0.25
+        # Input embedding and positional encoding
+        self.embedding = ComplexLinear(config.input_dim, config.d_model)
+        self.pos_encoding = PositionalEncoding(config)
         
-        # Handle positional encoding
-        if 'positional_encoding.freqs' in state_dict:
-            old_freqs = state_dict['positional_encoding.freqs']
-            embed_dim = self.positional_encoding.embed_dim
-            new_state['positional_encoding.freqs'] = F.interpolate(
-                old_freqs.unsqueeze(0).unsqueeze(0),
-                size=embed_dim,
-                mode='linear'
-            ).squeeze()
+        # Transformer blocks
+        self.blocks = nn.ModuleList([
+            TransformerLayer(config, self.ops, concept_graph)
+            for _ in range(config.num_layers)
+        ])
         
-        # Copy remaining keys
-        for k, v in state_dict.items():
-            if k not in new_state and not k.startswith('input_proj.') and not k.startswith('positional_encoding.'):
-                new_state[k] = v
+        # Output projection
+        self.output = ComplexLinear(config.d_model, config.output_dim)
+        
+        # Initialize weights
+        self.apply(self._init_weights)
+        
+    def _init_weights(self, module):
+        if isinstance(module, ComplexLinear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
                 
-        return new_state
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # Input embedding
+        x = self.embedding(x)
+        x = self.pos_encoding(x, self.ops)
+        
+        # Process through layers
+        for block in self.blocks:
+            x = block(x, self.ops)
+            
+        # Output projection
+        return self.output(x)
 
-    def load_state_dict(self, state_dict, strict=True):
-        """Override to handle conversion of old state dicts"""
-        converted_state = self._convert_state_dict(state_dict)
-        return super().load_state_dict(converted_state, strict=False)
+class FeedForward(nn.Module):
+    def __init__(self, d_model: int, d_ff: int):
+        super().__init__()
+        self.linear1 = LinearLayer(d_model, d_ff)
+        self.linear2 = LinearLayer(d_ff, d_model)
+        self.activation = nn.GELU()
+        self.norm = LayerNorm(d_model)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x = self.linear1(x)
+        x = self.activation(x)
+        x = self.linear2(x)
+        return self.norm(x + residual)
 
-    # --- ConceptGraph to Bytecode utility ---
-    def concept_graph_to_bytecode(self, start_concept=None, max_hops=5):
+class ComplexLinear(nn.Module):
+    """Complex-valued linear layer with geometric algebra support."""
+    def __init__(self, in_features: int, out_features: int, bias: bool = True):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        
+        # Initialize weights with proper scaling for complex numbers
+        # Note: weight shape is [in_features, out_features] for F.linear
+        self.weight = nn.Parameter(torch.randn(in_features, out_features, dtype=torch.complex64) * 0.02)
+        self.bias = nn.Parameter(torch.zeros(out_features, dtype=torch.complex64)) if bias else None
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not x.is_complex():
+            x = torch.complex(x, torch.zeros_like(x))
+            
+        # Handle batched inputs correctly
+        if x.dim() > 2:
+            batch_shape = x.shape[:-1]
+            x_reshaped = x.reshape(-1, x.shape[-1])
+            # F.linear expects weight shape [out_features, in_features]
+            out = F.linear(x_reshaped, self.weight.t(), self.bias)
+            return out.reshape(*batch_shape, -1)
+        else:
+            return F.linear(x, self.weight.t(), self.bias)
+
+class ComplexLoss(nn.Module):
+    """Custom loss function that handles complex numbers and incorporates concept graph regularization."""
+    def __init__(self, concept_graph=None, alpha=0.1, beta=0.01):
+        super().__init__()
+        self.concept_graph = concept_graph
+        self.alpha = alpha  # Weight for concept graph regularization
+        self.beta = beta   # Weight for complex number regularization
+        
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
-        Walk the concept graph as an AST and emit a list of bytecode instructions for the VM.
+        Compute loss between complex predictions and targets.
+        
+        Args:
+            pred: Complex tensor of shape [batch_size, seq_len, dim]
+            target: Complex tensor of shape [batch_size, seq_len, dim]
+            
+        Returns:
+            Total loss combining MSE, concept graph regularization, and complex number regularization
         """
-        if self.concept_graph is None:
-            return []
-        cg = self.concept_graph
-        visited = set()
-        bytecode = []
-        def walk(name, hops):
-            if name in visited or hops > max_hops:
-                return
-            visited.add(name)
-            c = cg.get(name)
-            if c is None:
-                return
-            # Example: emit LOADC for concept, then recursively for neighbors
-            bytecode.append(("LOADC", [name]))
-            for conn in cg.neighbors(name):
-                # Relationship can affect opcode
-                if conn.relationship == "attention":
-                    bytecode.append(("ADD_EDGE", [name, conn.target, str(conn.weight)]))
-                elif conn.relationship == "co-occurrence":
-                    bytecode.append(("ADD_EDGE", [name, conn.target, str(conn.weight)]))
-                # Recursively walk
-                walk(conn.target, hops + 1)
-        # Start from most central or provided concept
-        if start_concept is None:
-            central = cg.centrality(k=1)
-            if central:
-                start_concept = central[0][0]
-            else:
-                return []
-        walk(start_concept, 0)
-        return bytecode
+        # Ensure inputs are complex
+        if not pred.is_complex():
+            pred = torch.complex(pred, torch.zeros_like(pred))
+        if not target.is_complex():
+            target = torch.complex(target, torch.zeros_like(target))
+            
+        # Compute MSE loss for real and imaginary parts separately
+        real_loss = F.mse_loss(pred.real, target.real)
+        imag_loss = F.mse_loss(pred.imag, target.imag)
+        mse_loss = real_loss + imag_loss
+        
+        # Add complex number regularization to encourage meaningful phase
+        phase_reg = torch.mean(torch.abs(torch.angle(pred)))  # Penalize large phase angles
+        
+        # Add concept graph regularization if available
+        concept_loss = torch.tensor(0.0, device=pred.device)
+        if self.concept_graph is not None:
+            # Get concept embeddings from the graph
+            concepts = self.concept_graph.get_concepts()
+            if concepts is not None and len(concepts) > 0:
+                # Compute cosine similarity between predictions and concept embeddings
+                pred_norm = F.normalize(pred.reshape(-1, pred.shape[-1]), dim=-1)
+                concept_norm = F.normalize(concepts, dim=-1)
+                similarity = torch.matmul(pred_norm, concept_norm.t())
+                
+                # Encourage predictions to align with relevant concepts
+                concept_loss = -torch.mean(torch.max(similarity, dim=-1)[0])
+        
+        # Combine losses
+        total_loss = mse_loss + self.alpha * concept_loss + self.beta * phase_reg
+        
+        return total_loss

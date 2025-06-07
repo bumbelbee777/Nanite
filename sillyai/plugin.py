@@ -1,10 +1,13 @@
 from importlib import import_module
 from pathlib import Path
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any, Callable
 import inspect
 import logging
 from datetime import datetime
+import weakref
+
+from .ops import TensorCache, MixedPrecisionRouter
 
 logger = logging.getLogger(__name__)
 
@@ -14,14 +17,13 @@ class SillyPlugin(ABC):
     Plugins can hook into various stages of model execution and training.
     """
     def __init__(self):
-        self.model = None
+        # self.model = None  # REMOVE: model property is now managed by child via weakref
         self.enabled = False
         self.name = self.__class__.__name__
         self.last_run = None
 
     def on_init(self, model):
-        """Called when the plugin is initialized with the model."""
-        self.model = model
+        # self.model = model  # REMOVE: model property is now managed by child via weakref
         self.enabled = True
         self.last_run = datetime.now()
         logger.info(f"Plugin {self.name} initialized")
@@ -39,7 +41,6 @@ class SillyPlugin(ABC):
     def on_unload(self):
         """Called when the plugin is unloaded."""
         self.enabled = False
-        self.model = None
         logger.info(f"Plugin {self.name} unloaded")
 
     def before_forward(self, x):
@@ -83,122 +84,79 @@ class SillyPlugin(ABC):
         pass
 
 class PluginManager:
-    """Manages SillyAI plugins lifecycle and execution"""
-    def __init__(self, model):
-        self.model = model
-        self.plugins: Dict[str, SillyPlugin] = {}
-        self.active_plugins: List[str] = []
-        self._hook_cache = {}
-        logger.info("Plugin manager initialized")
-
-    def discover_plugins(self, plugin_dir: str = "plugins"):
-        """Discover plugins in the specified directory"""
-        plugin_path = Path(plugin_dir)
-        if not plugin_path.exists():
-            return
-
-        for py_file in plugin_path.glob("*.py"):
-            if py_file.name.startswith("_"):
-                continue
+    """Manages execution of model operations through TensorCache and MixedPrecisionRouter."""
+    
+    def __init__(self):
+        self.tensor_cache = TensorCache(max_bytes=1_000_000_000)  # 1GB cache
+        self.mixed_precision = MixedPrecisionRouter()
+        self.hooks = {
+            'before_forward': [],
+            'after_forward': [],
+            'before_backward': [],
+            'after_backward': [],
+            'before_save': [],
+            'after_load': []
+        }
+        
+    def initialize(self, model):
+        """Initialize the plugin manager with a model reference."""
+        self.model = weakref.ref(model)
+        self.tensor_cache.initialize()
+        self.mixed_precision.initialize()
+        logger.info("PluginManager initialized with TensorCache and MixedPrecisionRouter")
+        
+    def cleanup(self):
+        """Clean up resources."""
+        self.tensor_cache.cleanup()
+        self.mixed_precision.cleanup()
+        logger.info("PluginManager cleaned up")
+        
+    def call_hook(self, hook_name: str, *args, **kwargs) -> Any:
+        """Call all registered hooks for a given hook name."""
+        if hook_name not in self.hooks:
+            return args[0] if args else None
             
+        result = args[0] if args else None
+        
+        for hook in self.hooks[hook_name]:
             try:
-                # Import module
-                module_name = f"plugins.{py_file.stem}"
-                module = import_module(module_name)
+                result = hook(result, *args[1:], **kwargs)
+            except Exception as e:
+                logger.error(f"Error in hook {hook_name}: {str(e)}")
                 
-                # Find plugin classes
-                for name, obj in inspect.getmembers(module):
-                    if (inspect.isclass(obj) and 
-                        issubclass(obj, SillyPlugin) and 
-                        obj != SillyPlugin):
-                        
-                        plugin = obj()
-                        self.register_plugin(plugin)
-                        
-            except Exception as e:
-                logger.error(f"Failed to load plugin from {py_file}: {e}")
-
-    def register_plugin(self, plugin: SillyPlugin):
-        """Register a plugin instance"""
-        name = plugin.__class__.__name__
-        if name in self.plugins:
-            logger.warning(f"Plugin {name} already registered")
-            return False
+        return result
+        
+    def get_states(self) -> Dict[str, Any]:
+        """Get states for saving."""
+        return {
+            'tensor_cache': self.tensor_cache.get_state(),
+            'mixed_precision': self.mixed_precision.get_state()
+        }
+        
+    def load_states(self, states: Dict[str, Any]):
+        """Load states."""
+        if 'tensor_cache' in states:
+            self.tensor_cache.load_state(states['tensor_cache'])
+        if 'mixed_precision' in states:
+            self.mixed_precision.load_state(states['mixed_precision'])
             
-        self.plugins[name] = plugin
-        logger.info(f"Registered plugin: {name}")
-        return True
-
-    def enable_plugin(self, name: str):
-        """Enable a registered plugin"""
-        if name not in self.plugins:
-            logger.error(f"Plugin {name} not found")
-            return False
-            
-        plugin = self.plugins[name]
-        if name not in self.active_plugins:
-            plugin.on_init(self.model)
-            self.active_plugins.append(name)
-            plugin.on_enable()
-        return True
-
-    def disable_plugin(self, name: str):
-        """Disable an active plugin"""
-        if name in self.active_plugins:
-            plugin = self.plugins[name]
-            plugin.on_disable()
-            self.active_plugins.remove(name)
-            return True
-        return False
-
-    def unload_plugin(self, name: str):
-        """Completely unload a plugin"""
-        if name in self.active_plugins:
-            self.disable_plugin(name)
-        if name in self.plugins:
-            plugin = self.plugins[name]
-            plugin.on_unload()
-            del self.plugins[name]
-            return True
-        return False
-
-    def get_plugin(self, name: str) -> Optional[SillyPlugin]:
-        """Get a plugin instance by name"""
-        return self.plugins.get(name)
-
-    def call_hook(self, hook_name: str, *args, **kwargs):
-        """Call a specific hook on all active plugins"""
-        results = []
-        for name in self.active_plugins:
-            plugin = self.plugins[name]
-            hook = getattr(plugin, hook_name, None)
-            if hook and callable(hook):
-                try:
-                    result = hook(*args, **kwargs)
-                    if result is not None:
-                        results.append(result)
-                except Exception as e:
-                    logger.error(f"Error in plugin {name} hook {hook_name}: {e}")
-                    
-        return results[0] if results else args[0] if args else None
-
-    def save_states(self) -> Dict[str, dict]:
-        """Get save states from all active plugins"""
-        states = {}
-        for name in self.active_plugins:
-            plugin = self.plugins[name]
-            try:
-                states[name] = plugin.on_save()
-            except Exception as e:
-                logger.error(f"Error saving state for plugin {name}: {e}")
-        return states
-
-    def load_states(self, states: Dict[str, dict]):
-        """Load saved states into plugins"""
-        for name, state in states.items():
-            plugin = self.plugins.get(name)
-            if plugin:
-                try:
-                    plugin.on_load(state)
-                except Exception as e:
-                    logger.error(f"Error loading state for plugin {name}: {e}")
+    def list_plugins(self) -> List[str]:
+        """List available operations."""
+        return ['TensorCache', 'MixedPrecisionRouter']
+        
+    def get_plugin(self, name: str) -> Optional[Any]:
+        """Get an operation instance by name."""
+        if name == 'TensorCache':
+            return self.tensor_cache
+        elif name == 'MixedPrecisionRouter':
+            return self.mixed_precision
+        return None
+        
+    def has_plugin(self, name: str) -> bool:
+        """Check if an operation is available."""
+        return name in ['TensorCache', 'MixedPrecisionRouter']
+        
+    def clear(self):
+        """Clear all hooks."""
+        for hook_name in self.hooks:
+            self.hooks[hook_name].clear()

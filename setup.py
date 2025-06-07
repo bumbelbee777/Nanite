@@ -7,5 +7,5 @@ setup(
     author="bumblebee777",
     url="https://github.com/bumbelbee777/sillyai",
     packages=find_packages(),
-    install_requires=["torch"],
+    install_requires=["torch", "numpy", "numba"],
 )

@@ -8,3 +8,5 @@ sillyai.egg-info/
 snapshots/
 sillyai.egg-info/SOURCES.txt
 .pytest_cache/
+best.pt
+cache_chunks/
