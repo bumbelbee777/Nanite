@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
+from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -441,6 +441,140 @@ class DynamicActivation(nn.Module):
         
         return y
 
+class MatrixTypeSelector(nn.Module):
+    """Automatically selects the best structured matrix type based on input characteristics."""
+    
+    def __init__(self, d_model: int, ops: MultivectorOps):
+        super().__init__()
+        self.d_model = d_model
+        self.ops = ops
+        
+        # Initialize parameters for matrix type selection
+        self.type_weights = nn.Parameter(torch.ones(4))  # Weights for different matrix types
+        self.temperature = nn.Parameter(torch.ones(1) * 0.1)  # Temperature for softmax
+        
+        # Initialize feature extractors
+        self.feature_net = ComplexMLP(
+            ModelConfig(input_dim=4, mlp_dim=32, output_dim=4, n_heads=1, n_layers=1, dropout=0.0),
+            ops
+        )
+        
+        # Matrix types: 0=Toeplitz, 1=BlockToeplitz, 2=Circulant, 3=Hankel
+        self.matrix_types = ['toeplitz', 'block_toeplitz', 'circulant', 'hankel']
+        
+    def _extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract features from input to determine matrix type."""
+        # Compute various statistics
+        spectral_norm = torch.norm(x, dim=(-1, -2)).mean()  # Spectral norm
+        sparsity = (torch.abs(x) < 1e-3).float().mean()     # Sparsity
+        symmetry = torch.abs(x - x.transpose(-1, -2)).mean() # Symmetry measure
+        locality = torch.abs(x[:, :, 1:] - x[:, :, :-1]).mean() # Locality measure
+        
+        # Stack features
+        features = torch.stack([
+            spectral_norm, sparsity, symmetry, locality
+        ], dim=-1).to(torch.complex64)
+        
+        return features
+        
+    def forward(self, x: torch.Tensor) -> Tuple[str, torch.Tensor]:
+        """Select matrix type and return corresponding parameters."""
+        # Extract features
+        features = self._extract_features(x)
+        
+        # Get type scores
+        scores = self.feature_net(features)
+        scores = scores.real  # Use real part for type selection
+        
+        # Apply temperature-scaled softmax
+        scores = scores / self.temperature
+        probs = F.softmax(scores, dim=-1)
+        
+        # Select matrix type
+        type_idx = torch.argmax(probs).item()
+        matrix_type = self.matrix_types[type_idx]
+        
+        # Generate parameters based on selected type
+        if matrix_type == 'toeplitz':
+            params = self._generate_toeplitz_params(x)
+        elif matrix_type == 'block_toeplitz':
+            params = self._generate_block_toeplitz_params(x)
+        elif matrix_type == 'circulant':
+            params = self._generate_circulant_params(x)
+        else:  # hankel
+            params = self._generate_hankel_params(x)
+            
+        return matrix_type, params
+        
+    def _generate_toeplitz_params(self, x: torch.Tensor) -> torch.Tensor:
+        """Generate parameters for Toeplitz matrix."""
+        diags = torch.zeros(self.d_model * 2 - 1, device=x.device, dtype=torch.complex64)
+        for i in range(-self.d_model + 1, self.d_model):
+            diags[i + self.d_model - 1] = torch.mean(torch.diagonal(x, offset=i))
+        return diags
+        
+    def _generate_block_toeplitz_params(self, x: torch.Tensor) -> torch.Tensor:
+        """Generate parameters for block Toeplitz matrix."""
+        # Get input dimensions
+        batch_size, seq_len, d_model = x.shape
+        
+        # Calculate block size as the largest perfect square that divides d_model
+        block_size = int(math.sqrt(d_model))
+        while d_model % block_size != 0:
+            block_size -= 1
+            
+        # Ensure block_size is at least 2
+        block_size = max(2, block_size)
+        
+        # Calculate number of blocks needed
+        num_blocks = d_model // block_size
+        
+        # Initialize blocks tensor with correct shape
+        blocks = torch.zeros(
+            num_blocks * 2 - 1,  # Number of blocks
+            block_size,          # Block height
+            block_size,          # Block width
+            device=x.device,
+            dtype=torch.complex64
+        )
+        
+        # Extract and average blocks
+        for i in range(-num_blocks + 1, num_blocks):
+            # Calculate valid indices for the current block
+            start_idx = max(0, i)
+            end_idx = min(d_model, d_model + i)
+            
+            if end_idx > start_idx:  # Only process if we have valid indices
+                # Extract the block from the key tensor
+                block = x[:, :, start_idx:end_idx]  # Shape: [batch_size, seq_len, block_size]
+                
+                # Average across batch and sequence dimensions
+                block_avg = torch.mean(block, dim=(0, 1))  # Shape: [block_size]
+                
+                # Create a block matrix by repeating the average
+                block_matrix = torch.zeros(block_size, block_size, device=x.device, dtype=torch.complex64)
+                for j in range(block_size):
+                    block_matrix[j, j:] = block_avg[:block_size-j]
+                    block_matrix[j:, j] = block_avg[:block_size-j]
+                
+                # Store the block matrix
+                blocks[i + num_blocks - 1] = block_matrix
+        
+        return blocks
+        
+    def _generate_circulant_params(self, x: torch.Tensor) -> torch.Tensor:
+        """Generate parameters for circulant matrix."""
+        return x[:, 0, :].mean(dim=0)
+        
+    def _generate_hankel_params(self, x: torch.Tensor) -> torch.Tensor:
+        """Generate parameters for Hankel matrix."""
+        anti_diags = torch.zeros(self.d_model * 2 - 1, device=x.device, dtype=torch.complex64)
+        for i in range(-self.d_model + 1, self.d_model):
+            anti_diags[i + self.d_model - 1] = torch.mean(
+                torch.diagonal(x.flip(-1), offset=i)
+            )
+        return anti_diags
+
 class InfiniToeplitz(nn.Module):
     def __init__(self, config: ModelConfig, ops: MultivectorOps):
         super().__init__()
@@ -452,43 +586,188 @@ class InfiniToeplitz(nn.Module):
         self.key = nn.Parameter(torch.randn(self.d_model, self.d_model, dtype=torch.complex64) * 0.02)
         self.value = nn.Parameter(torch.randn(self.d_model, self.d_model, dtype=torch.complex64) * 0.02)
         
-        # Initialize circulant matrix
-        self.circulant = nn.Parameter(torch.randn(self.d_model, dtype=torch.complex64) * 0.02)
+        # Initialize matrix type selector
+        self.type_weights = nn.Parameter(torch.ones(4))  # Weights for different matrix types
+        self.temperature = nn.Parameter(torch.ones(1) * 0.1)  # Temperature for softmax
+        
+        # Matrix types: 0=Toeplitz, 1=BlockToeplitz, 2=Circulant, 3=Hankel
+        self.matrix_types = ['toeplitz', 'block_toeplitz', 'circulant', 'hankel']
         
         # Scale factor for attention
         self.scale = 1.0 / math.sqrt(self.d_model)
         
-    def _circulant_matmul(self, x, c):
-        """Multiply by circulant matrix using FFT."""
-        # Add small epsilon to prevent division by zero
-        c = c + self.eps
+    def _select_matrix_type(self, x: torch.Tensor) -> Tuple[str, torch.Tensor]:
+        """Select matrix type based on input characteristics."""
+        # Compute features
+        spectral_norm = torch.norm(x, dim=(-1, -2)).mean()
+        sparsity = (torch.abs(x) < 1e-3).float().mean()
+        symmetry = torch.abs(x - x.transpose(-1, -2)).mean()
+        locality = torch.abs(x[:, :, 1:] - x[:, :, :-1]).mean()
         
-        # FFT of circulant matrix
-        c_fft = torch.fft.fft(c)
+        # Stack features
+        features = torch.stack([spectral_norm, sparsity, symmetry, locality])
         
-        # FFT of input
+        # Get type scores
+        scores = features * self.type_weights
+        scores = scores / self.temperature
+        probs = F.softmax(scores, dim=0)
+        
+        # Select matrix type
+        type_idx = torch.argmax(probs).item()
+        matrix_type = self.matrix_types[type_idx]
+        
+        # Generate parameters based on selected type
+        if matrix_type == 'toeplitz':
+            params = self._generate_toeplitz_params(x)
+        elif matrix_type == 'block_toeplitz':
+            params = self._generate_block_toeplitz_params(x)
+        elif matrix_type == 'circulant':
+            params = self._generate_circulant_params(x)
+        else:  # hankel
+            params = self._generate_hankel_params(x)
+            
+        return matrix_type, params
+        
+    def _generate_toeplitz_params(self, x: torch.Tensor) -> torch.Tensor:
+        """Generate parameters for Toeplitz matrix."""
+        diags = torch.zeros(self.d_model * 2 - 1, device=x.device, dtype=torch.complex64)
+        for i in range(-self.d_model + 1, self.d_model):
+            diags[i + self.d_model - 1] = torch.mean(torch.diagonal(x, offset=i))
+        return diags
+        
+    def _generate_block_toeplitz_params(self, x: torch.Tensor) -> torch.Tensor:
+        """Generate parameters for block Toeplitz matrix."""
+        # Get input dimensions
+        batch_size, seq_len, d_model = x.shape
+        
+        # Calculate block size as the largest perfect square that divides d_model
+        block_size = int(math.sqrt(d_model))
+        while d_model % block_size != 0:
+            block_size -= 1
+            
+        # Ensure block_size is at least 2
+        block_size = max(2, block_size)
+        
+        # Calculate number of blocks needed
+        num_blocks = d_model // block_size
+        
+        # Initialize blocks tensor with correct shape
+        blocks = torch.zeros(
+            num_blocks * 2 - 1,  # Number of blocks
+            block_size,          # Block height
+            block_size,          # Block width
+            device=x.device,
+            dtype=torch.complex64
+        )
+        
+        # Extract and average blocks
+        for i in range(-num_blocks + 1, num_blocks):
+            # Calculate valid indices for the current block
+            start_idx = max(0, i)
+            end_idx = min(d_model, d_model + i)
+            
+            if end_idx > start_idx:  # Only process if we have valid indices
+                # Extract the block from the key tensor
+                block = x[:, :, start_idx:end_idx]  # Shape: [batch_size, seq_len, block_size]
+                
+                # Average across batch and sequence dimensions
+                block_avg = torch.mean(block, dim=(0, 1))  # Shape: [block_size]
+                
+                # Create a block matrix by repeating the average
+                block_matrix = torch.zeros(block_size, block_size, device=x.device, dtype=torch.complex64)
+                for j in range(block_size):
+                    block_matrix[j, j:] = block_avg[:block_size-j]
+                    block_matrix[j:, j] = block_avg[:block_size-j]
+                
+                # Store the block matrix
+                blocks[i + num_blocks - 1] = block_matrix
+        
+        return blocks
+        
+    def _generate_circulant_params(self, x: torch.Tensor) -> torch.Tensor:
+        """Generate parameters for circulant matrix."""
+        return x[:, 0, :].mean(dim=0)
+        
+    def _generate_hankel_params(self, x: torch.Tensor) -> torch.Tensor:
+        """Generate parameters for Hankel matrix."""
+        anti_diags = torch.zeros(self.d_model * 2 - 1, device=x.device, dtype=torch.complex64)
+        for i in range(-self.d_model + 1, self.d_model):
+            anti_diags[i + self.d_model - 1] = torch.mean(
+                torch.diagonal(x.flip(-1), offset=i)
+            )
+        return anti_diags
+        
+    def _apply_structured_matrix(self, x: torch.Tensor, matrix_type: str, params: torch.Tensor) -> torch.Tensor:
+        """Apply the selected structured matrix to input."""
+        if matrix_type == 'toeplitz':
+            return self._apply_toeplitz(x, params)
+        elif matrix_type == 'block_toeplitz':
+            return self._apply_block_toeplitz(x, params)
+        elif matrix_type == 'circulant':
+            return self._apply_circulant(x, params)
+        else:  # hankel
+            return self._apply_hankel(x, params)
+            
+    def _apply_toeplitz(self, x: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
+        """Apply Toeplitz matrix multiplication."""
+        matrix = torch.zeros(self.d_model, self.d_model, device=x.device, dtype=torch.complex64)
+        for i in range(self.d_model):
+            for j in range(self.d_model):
+                matrix[i, j] = params[i - j + self.d_model - 1]
+        return torch.matmul(x, matrix)
+        
+    def _apply_block_toeplitz(self, x: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
+        """Apply block Toeplitz matrix multiplication."""
+        # Get input dimensions
+        batch_size, seq_len, d_model = x.shape
+        
+        # Get block size from params
+        block_size = params.shape[1]  # Block height/width
+        num_blocks = d_model // block_size
+        
+        # Initialize output matrix
+        matrix = torch.zeros(d_model, d_model, device=x.device, dtype=torch.complex64)
+        
+        # Fill matrix with blocks
+        for i in range(num_blocks):
+            for j in range(num_blocks):
+                block_idx = i - j + num_blocks - 1
+                if 0 <= block_idx < params.shape[0]:  # Check if block index is valid
+                    matrix[i*block_size:(i+1)*block_size, 
+                          j*block_size:(j+1)*block_size] = params[block_idx]
+        
+        return torch.matmul(x, matrix)
+        
+    def _apply_circulant(self, x: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
+        """Apply circulant matrix multiplication using FFT."""
+        params_fft = torch.fft.fft(params)
         x_fft = torch.fft.fft(x, dim=-1)
+        y_fft = x_fft * params_fft.unsqueeze(0)
+        return torch.fft.ifft(y_fft, dim=-1)
         
-        # Element-wise multiplication in frequency domain
-        y_fft = x_fft * c_fft.unsqueeze(0)
-        
-        # Inverse FFT
-        y = torch.fft.ifft(y_fft, dim=-1)
-        
-        return y
+    def _apply_hankel(self, x: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
+        """Apply Hankel matrix multiplication."""
+        matrix = torch.zeros(self.d_model, self.d_model, device=x.device, dtype=torch.complex64)
+        for i in range(self.d_model):
+            for j in range(self.d_model):
+                matrix[i, j] = params[i + j]
+        return torch.matmul(x, matrix)
         
     def forward(self, x, ops=None, tokens=None):
-        """Forward pass with complex number support."""
+        """Forward pass with automatic matrix type selection."""
         # Project queries, keys, and values
-        q = torch.matmul(x, self.query)  # [batch_size, seq_len, d_model]
-        k = torch.matmul(x, self.key)    # [batch_size, seq_len, d_model]
-        v = torch.matmul(x, self.value)  # [batch_size, seq_len, d_model]
+        q = torch.matmul(x, self.query)
+        k = torch.matmul(x, self.key)
+        v = torch.matmul(x, self.value)
         
-        # Apply circulant matrix to keys
-        k = self._circulant_matmul(k, self.circulant)
+        # Select matrix type and get parameters
+        matrix_type, params = self._select_matrix_type(k)
         
-        # Compute attention scores using complex conjugate for proper complex multiplication
-        scores = torch.matmul(q, k.conj().transpose(-2, -1)) * self.scale  # [batch_size, seq_len, seq_len]
+        # Apply selected structured matrix to keys
+        k = self._apply_structured_matrix(k, matrix_type, params)
+        
+        # Compute attention scores
+        scores = torch.matmul(q, k.conj().transpose(-2, -1)) * self.scale
         
         # Use magnitude for softmax
         scores_mag = torch.abs(scores)
@@ -499,7 +778,7 @@ class InfiniToeplitz(nn.Module):
         attn_weights = attn_weights.to(torch.complex64)
         
         # Apply attention weights
-        output = torch.matmul(attn_weights, v)  # [batch_size, seq_len, d_model]
+        output = torch.matmul(attn_weights, v)
         
         return output
 
@@ -680,49 +959,34 @@ class ComplexLinear(nn.Module):
             return F.linear(x, self.weight.t(), self.bias)
 
 class ComplexLoss(nn.Module):
-    """Custom loss function that handles complex numbers and incorporates concept graph regularization."""
+    """Complex-valued loss function with concept alignment."""
+    
     def __init__(self, concept_graph=None, alpha=0.1, beta=0.01):
         super().__init__()
         self.concept_graph = concept_graph
-        self.alpha = alpha  # Weight for concept graph regularization
-        self.beta = beta   # Weight for complex number regularization
-        
+        self.alpha = alpha
+        self.beta = beta
+    
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """
-        Compute loss between complex predictions and targets.
+        """Compute the complex loss with concept alignment."""
+        # MSE loss for magnitude
+        mse_loss = F.mse_loss(torch.abs(pred), torch.abs(target))
         
-        Args:
-            pred: Complex tensor of shape [batch_size, seq_len, dim]
-            target: Complex tensor of shape [batch_size, seq_len, dim]
-            
-        Returns:
-            Total loss combining MSE, concept graph regularization, and complex number regularization
-        """
-        # Ensure inputs are complex
-        if not pred.is_complex():
-            pred = torch.complex(pred, torch.zeros_like(pred))
-        if not target.is_complex():
-            target = torch.complex(target, torch.zeros_like(target))
-            
-        # Add small epsilon to prevent division by zero
-        eps = 1e-8
-            
-        # Compute MSE loss for real and imaginary parts separately
-        real_loss = F.mse_loss(pred.real, target.real)
-        imag_loss = F.mse_loss(pred.imag, target.imag)
-        mse_loss = real_loss + imag_loss
+        # Phase regularization
+        phase_reg = torch.mean(torch.abs(torch.angle(pred) - torch.angle(target)))
         
-        # Add complex number regularization to encourage meaningful phase
-        # Use safe_atan2 to prevent NaN
-        pred_phase = torch.atan2(pred.imag + eps, pred.real + eps)
-        phase_reg = torch.mean(torch.abs(pred_phase))  # Penalize large phase angles
-        
-        # Add concept graph regularization if available
+        # Initialize concept loss
         concept_loss = torch.tensor(0.0, device=pred.device)
-        if self.concept_graph is not None:
+        
+        # Compute concept alignment if concept graph is available
+        if self.concept_graph is not None and isinstance(self.concept_graph, dict):
             # Get concept embeddings from the graph
-            concepts = self.concept_graph.get_concepts()
+            concepts = self.concept_graph.get('concepts', None)
             if concepts is not None and len(concepts) > 0:
+                # Convert concepts to tensor if needed
+                if not isinstance(concepts, torch.Tensor):
+                    concepts = torch.tensor(concepts, device=pred.device, dtype=torch.complex64)
+                
                 # Compute cosine similarity between predictions and concept embeddings
                 pred_norm = F.normalize(pred.reshape(-1, pred.shape[-1]), dim=-1)
                 concept_norm = F.normalize(concepts, dim=-1)

@@ -1,7 +1,7 @@
 from ..plugin import SillyPlugin
 from ..utils import ChunkedMMapDataset, CACHE_DIR
 from ..config import ModelConfig
-from ..loss import ComplexLoss
+from ..core import ComplexLoss
 from .visualizer import ModelProfiler, WavefunctionVisualizer, load_best_model
 import torch
 from torch.utils.data import DataLoader, ConcatDataset, TensorDataset

@@ -20,6 +20,8 @@ class DynamicLearningRate:
         self.no_improvement_count = 0
         self.step_count = 0
         self.reward_history = []
+        self.rewards = 0
+        self.punishments = 0
         
     def step(self, loss, optimizer):
         """Update learning rate based on loss improvement."""
@@ -29,7 +31,6 @@ class DynamicLearningRate:
         if self.step_count <= self.warmup_steps:
             self.current_lr = self.initial_lr * (self.step_count / self.warmup_steps)
             self._update_optimizer(optimizer)
-            self.reward_history.append(0)  # 0 for warmup steps
             return
             
         # Check for improvement
@@ -38,12 +39,12 @@ class DynamicLearningRate:
             self.current_lr = min(self.current_lr * self.reward_factor, self.max_lr)
             self.best_loss = loss
             self.no_improvement_count = 0
-            self.reward_history.append(1)  # 1 for reward
+            self.rewards += 1
         else:
             # Punishment: Decrease learning rate
             self.current_lr = max(self.current_lr * self.punishment_factor, self.min_lr)
             self.no_improvement_count += 1
-            self.reward_history.append(-1)  # -1 for punishment
+            self.punishments += 1
             
         # Update optimizer
         self._update_optimizer(optimizer)
@@ -55,15 +56,11 @@ class DynamicLearningRate:
             
     def get_reward_stats(self):
         """Get statistics about rewards and punishments."""
-        if not self.reward_history:
-            return {"rewards": 0, "punishments": 0, "ratio": 0}
-            
-        rewards = sum(1 for x in self.reward_history if x > 0)
-        punishments = sum(1 for x in self.reward_history if x < 0)
-        ratio = rewards / (rewards + punishments) if (rewards + punishments) > 0 else 0
+        total = self.rewards + self.punishments
+        ratio = self.rewards / total if total > 0 else 0
         
         return {
-            "rewards": rewards,
-            "punishments": punishments,
+            "rewards": self.rewards,
+            "punishments": self.punishments,
             "ratio": ratio
         } 

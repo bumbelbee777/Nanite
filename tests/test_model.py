@@ -32,7 +32,7 @@ from sillyai.core import (
 from sillyai.model import SillyAI
 from sillyai.ops import AsyncLRUTensorCache
 from sillyai.concept import ConceptGraph
-from sillyai.loss import ComplexLoss
+from sillyai.core import ComplexLoss
 from sillyai.plugins.trainer import SillyAITrainerPlugin
 
 class TestConceptGraph:
