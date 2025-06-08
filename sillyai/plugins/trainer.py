@@ -1,0 +1,425 @@
+from ..plugin import SillyPlugin
+from ..utils import ChunkedMMapDataset, CACHE_DIR
+from ..config import ModelConfig
+from ..loss import ComplexLoss
+from .visualizer import ModelProfiler, WavefunctionVisualizer, load_best_model
+import torch
+from torch.utils.data import DataLoader, ConcatDataset, TensorDataset
+import torch.nn as nn
+import numpy as np
+import os
+import time
+from datetime import timedelta
+import asyncio
+from pathlib import Path
+from .dynamic_learning_rate import DynamicLearningRate
+
+class SillyAITrainerPlugin(SillyPlugin):
+    """
+    SillyAI plugin for training, evaluation, and self-learning.
+    Encapsulates all training logic previously in __main__.py.
+    """
+    def __init__(self, config=None):
+        super().__init__()
+        self.config = config
+        self.train_loader = None
+        self.val_loader = None
+        self.device = None
+        self.early_stop_patience = 5
+        self.batch_size = 32
+        self.seq_len = 64
+        self.lr = 1e-3
+        self.epochs = 10
+        self.verbose = True
+        self.ops = None
+        self.profiler = None
+        self.visualizer = None
+        self.ψ_history = []  # Store wavefunction history for animation
+        self.weight_decay = 0.0  # Initialize weight decay parameter
+        self.loop = asyncio.get_event_loop()  # Get event loop for async operations
+        self.x_tensor = None  # Store x tensor for visualization
+        self.lr_manager = None  # Store learning rate manager
+        
+        # Create checkpoints directory
+        self.checkpoint_dir = Path("checkpoints")
+        self.checkpoint_dir.mkdir(exist_ok=True)
+        self.best_loss = float('inf')
+
+    def setup(self, model, ops, train_dataset=None, val_dataset=None, batch_size=32, 
+             seq_len=64, lr=1e-3, epochs=10, early_stop=5, weight_decay=0.0):
+        """Setup trainer with model and datasets."""
+        self.model = model
+        self.ops = ops
+        self.train_dataset = train_dataset
+        self.val_dataset = val_dataset
+        self.batch_size = batch_size
+        self.seq_len = seq_len
+        self.epochs = epochs
+        self.early_stop = early_stop
+        self.weight_decay = weight_decay
+        self.device = next(model.parameters()).device
+        
+        # Initialize visualizer
+        self.visualizer = WavefunctionVisualizer()
+        
+        # Initialize profiler
+        self.profiler = ModelProfiler(save_dir="profiles")
+        
+        # Create x tensor for visualization
+        self.x_tensor = torch.linspace(-1, 1, seq_len).to(self.device)
+        
+        # Create data loaders
+        if train_dataset:
+            self.train_loader = DataLoader(
+                train_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                collate_fn=self.collate_fn
+            )
+            
+        if val_dataset:
+            self.val_loader = DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                collate_fn=self.collate_fn
+            )
+            
+        # Initialize optimizer with weight decay
+        self.optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=lr,
+            weight_decay=weight_decay
+        )
+        
+        # Initialize learning rate manager
+        self.lr_manager = DynamicLearningRate(
+            initial_lr=lr,
+            min_lr=1e-6,
+            max_lr=1e-3,
+            warmup_steps=100,
+            reward_factor=1.1,
+            punishment_factor=0.9,
+            patience=3,
+            min_delta=1e-4
+        )
+        
+        # Initialize custom loss function
+        self.criterion = ComplexLoss(
+            concept_graph=model.concept_graph,
+            alpha=0.1,  # Weight for concept graph regularization
+            beta=0.01   # Weight for complex number regularization
+        )
+        
+        # Log setup configuration
+        print("\n[SillyAITrainerPlugin] Setup configuration:")
+        print(f"  Device: {self.device}")
+        print(f"  Batch size: {batch_size}")
+        print(f"  Learning rate: {lr}")
+        print(f"  Weight decay: {weight_decay}")
+        print(f"  Early stop patience: {early_stop}")
+        if train_dataset:
+            print(f"  Training samples: {len(train_dataset)}")
+        if val_dataset:
+            print(f"  Validation samples: {len(val_dataset)}")
+            
+    async def _forward_pass(self, V: torch.Tensor) -> torch.Tensor:
+        """Helper method to handle async forward pass."""
+        return await self.model.transformer(V, generate_response=False)
+
+    async def train_epoch(self):
+        """Train for one epoch."""
+        self.model.train()
+        total_loss = 0
+        num_batches = 0
+        
+        for batch_idx, (V, psi) in enumerate(self.train_loader):
+            # Move data to device
+            V = V.to(self.model.device)
+            psi = psi.to(self.model.device)
+            
+            # Debug logging
+            # print(f"\nBatch {batch_idx} shapes:")
+            # print(f"V shape: {V.shape}, V stats: min={V.min().item():.4f}, max={V.max().item():.4f}, mean={V.mean().item():.4f}")
+            # print(f"psi shape: {psi.shape}, psi stats: min={psi.min().item():.4f}, max={psi.max().item():.4f}, mean={psi.mean().item():.4f}")
+            
+            # Forward pass
+            self.optimizer.zero_grad()
+            psi_pred = await self._forward_pass(V)
+            
+            # Debug logging for predictions with complex number handling
+            # print(f"psi_pred shape: {psi_pred.shape}")
+            # if torch.is_complex(psi_pred):
+            #    print(f"psi_pred stats (magnitude): min={torch.abs(psi_pred).min().item():.4f}, max={torch.abs(psi_pred).max().item():.4f}, mean={torch.abs(psi_pred).mean().item():.4f}")
+            #     print(f"psi_pred phase: min={torch.angle(psi_pred).min().item():.4f}, max={torch.angle(psi_pred).max().item():.4f}, mean={torch.angle(psi_pred).mean().item():.4f}")
+            # else:
+            #    print(f"psi_pred stats: min={psi_pred.min().item():.4f}, max={psi_pred.max().item():.4f}, mean={psi_pred.mean().item():.4f}")
+            
+            # Calculate loss using complex loss
+            loss = self.criterion(psi_pred, psi)
+            
+            # Debug logging for loss components
+            if torch.isnan(loss):
+                print("\nNaN loss detected! Breaking down components:")
+                pred_real, pred_imag = psi_pred.real, psi_pred.imag
+                target_real, target_imag = psi.real, psi.imag
+                real_loss = torch.mean((pred_real - target_real) ** 2)
+                imag_loss = torch.mean((pred_imag - target_imag) ** 2)
+                print(f"Real loss: {real_loss.item():.4f}")
+                print(f"Imag loss: {imag_loss.item():.4f}")
+                print(f"Phase loss: {self.criterion._compute_phase_loss(psi_pred, psi).item():.4f}")
+                print(f"Concept loss: {self.criterion._compute_concept_loss(psi_pred).item():.4f}")
+            
+            # Backward pass
+            loss.backward()
+            
+            # Debug logging for gradients
+            if torch.isnan(loss):
+                print("\nGradient stats:")
+                for name, param in self.model.named_parameters():
+                    if param.grad is not None:
+                        grad_norm = param.grad.norm().item()
+                        print(f"{name}: grad_norm={grad_norm:.4f}")
+            
+            self.optimizer.step()
+            
+            # Update statistics
+            total_loss += loss.item()
+            num_batches += 1
+            
+            # Log progress
+            if batch_idx % 10 == 0:
+                print(f"\rBatch {batch_idx}/{len(self.train_loader)} - Loss: {loss.item():.6f}", end="")
+                
+        print()  # New line after progress
+        return total_loss / num_batches if num_batches > 0 else 0
+        
+    async def validate(self):
+        """Validate the model."""
+        self.model.eval()
+        total_loss = 0
+        num_batches = 0
+        
+        with torch.no_grad():
+            for V, psi in self.val_loader:
+                # Move data to device
+                V = V.to(self.model.device)
+                psi = psi.to(self.model.device)
+                
+                # Forward pass
+                psi_pred = await self._forward_pass(V)
+                
+                # Calculate loss using complex loss
+                loss = self.criterion(psi_pred, psi)
+                
+                # Update statistics
+                total_loss += loss.item()
+                num_batches += 1
+                
+        return total_loss / num_batches if num_batches > 0 else 0
+
+    def train(self, epochs=None):
+        """Synchronous wrapper for async training."""
+        if epochs is not None:
+            self.epochs = epochs
+        best_val = float('inf')
+        no_imp = 0
+        start_time = time.time()
+        print("\033[95m✨ [SillyAI] Training started (plugin) ✨\033[0m")
+        print(f"\033[96m🖥️  Device: {self.device} | Epochs: {self.epochs} | Batch size: {self.batch_size}\033[0m\n")
+        
+        for ep in range(1, self.epochs + 1):
+            self.profiler.start_epoch()
+            epoch_start = time.time()
+            
+            # Training phase
+            self.model.train()
+            train_loss = self.loop.run_until_complete(self.train_epoch())
+            
+            # Validation phase
+            val_loss = self.loop.run_until_complete(self.validate())
+            
+            # Update learning rate based on validation loss using DynamicLearningRate
+            old_lr = self.lr_manager.current_lr
+            self.lr_manager.step(val_loss, self.optimizer)
+            new_lr = self.lr_manager.current_lr
+            if new_lr != old_lr:
+                print(f"\n\033[93m📉 Learning rate changed from {old_lr:.2e} to {new_lr:.2e}\033[0m")
+            
+            # Inference test
+            test_loss = self.loop.run_until_complete(self.run_inference_test())
+            
+            # Update profiler with metrics
+            metrics = {
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+                'test_loss': test_loss,
+                'learning_rate': new_lr
+            }
+            self.profiler.end_epoch(ep, metrics)
+            
+            # Plot metrics
+            self.profiler.plot_metrics(f"profiles/metrics_epoch_{ep}.png")
+            
+            # Early stopping check with relative improvement threshold
+            if val_loss < best_val * 0.999:  # Require at least 0.1% improvement
+                best_val = val_loss
+                no_imp = 0
+                # Save epoch checkpoint
+                torch.save({
+                    'epoch': ep,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'val_loss': val_loss,
+                    'train_loss': train_loss,
+                    'test_loss': test_loss
+                }, self.checkpoint_dir / f'best_epoch_{ep}.pt')
+                
+                # Update best overall model if this is the best so far
+                if val_loss < self.best_loss:
+                    self.best_loss = val_loss
+                    torch.save({
+                        'epoch': ep,
+                        'model_state_dict': self.model.state_dict(),
+                        'optimizer_state_dict': self.optimizer.state_dict(),
+                        'val_loss': val_loss,
+                        'train_loss': train_loss,
+                        'test_loss': test_loss
+                    }, self.checkpoint_dir / 'best.pt')
+                    print(f"\n\033[92m💾 New best model saved! (Loss: {val_loss:.4e})\033[0m")
+                improved = True
+            else:
+                no_imp += 1
+                improved = False
+                
+            # Progress reporting
+            epoch_time = time.time() - epoch_start
+            elapsed = time.time() - start_time
+            remaining_epochs = self.epochs - ep
+            eta_sec = (elapsed / ep) * remaining_epochs
+            
+            bar_len = 30
+            progress = min(no_imp / self.early_stop_patience, 1.0)
+            bar = f"\033[92m{'█' * int(progress * bar_len)}\033[90m{'-' * (bar_len - int(progress * bar_len))}\033[0m"
+            
+            print(f"\033[1mEpoch {ep:3d}/{self.epochs} \033[93m⏳{timedelta(seconds=int(epoch_time))}\033[0m "
+                  f"| Train \033[91m{train_loss:.4e}\033[0m | Val \033[91m{val_loss:.4e}\033[0m | "
+                  f"Test \033[91m{test_loss:.4e}\033[0m | LR \033[96m{new_lr:.2e}\033[0m | "
+                  f"ETA \033[95m{timedelta(seconds=int(eta_sec))}\033[0m\n"
+                  f"  EarlyStop [{bar}] {no_imp}/{self.early_stop_patience} "
+                  f"{'✅ Improved!' if improved else '❌ No improvement'}\n")
+            
+            if no_imp >= self.early_stop_patience:
+                print(f"\033[91m🚫 No improvement for {no_imp} epochs — stopping early.\033[0m\n")
+                break
+                
+        total_time = time.time() - start_time
+        print(f"\033[92m🎉 Training complete in {timedelta(seconds=int(total_time))} 🎉\033[0m\n")
+        
+        # Create final animation of wavefunction evolution
+        if self.visualizer is not None and len(self.ψ_history) > 1:
+            self.visualizer.create_animation(
+                self.x_tensor,
+                torch.zeros_like(self.x_tensor),  # Placeholder for potential
+                self.ψ_history,
+                "profiles/wavefunction_evolution.gif"
+            )
+
+    async def run_inference_test(self):
+        """Run inference test on a small batch of data."""
+        self.model.eval()
+        with torch.no_grad():
+            # Generate test data
+            x = torch.linspace(-1, 1, self.seq_len).unsqueeze(0).unsqueeze(-1)  # [1, seq_len, 1]
+            V = 0.5 * x**2  # Simple harmonic potential
+            ψ = torch.exp(-x**2/2)  # Ground state of harmonic oscillator
+            ψ = ψ / torch.norm(ψ, dim=1, keepdim=True)
+            
+            # Run inference
+            V = V.to(self.device)
+            ψ = ψ.to(self.device)
+            ψ_pred = await self._forward_pass(V)
+            
+            # Store prediction for animation
+            self.ψ_history.append(ψ_pred[0])
+            
+            # Visualize wavefunction if visualizer is available
+            if self.visualizer is not None:
+                try:
+                    # Plot wavefunction magnitude
+                    self.visualizer.plot_wavefunction(
+                        x[0], V[0], ψ[0], ψ_pred[0],
+                        epoch=len(self.ψ_history),
+                        save=True
+                    )
+                    
+                    # Create animation if we have enough history
+                    if len(self.ψ_history) > 1:
+                        self.visualizer.create_animation(
+                            x[0],
+                            self.ψ_history,
+                            f"profiles/wavefunction_evolution.gif"
+                        )
+                except Exception as e:
+                    print(f"\n\033[93m⚠️ Warning: Failed to plot wavefunction: {str(e)}\033[0m")
+            
+            # Compute loss
+            if not ψ.is_complex():
+                ψ = torch.complex(ψ, torch.zeros_like(ψ))
+            loss = self.criterion(ψ_pred, ψ)
+            
+            # Print sample prediction
+            print("\n\033[95m📊 Sample Prediction:\033[0m")
+            print(f"Input shape: {V.shape}")
+            print(f"Output shape: {ψ_pred.shape}")
+            print(f"Max amplitude: {torch.abs(ψ_pred).max().item():.4f}")
+            print(f"Mean phase: {torch.angle(ψ_pred).mean().item():.4f}\n")
+            
+            return loss.item()
+
+    def collate_fn(self, batch):
+        """Custom collate function that handles both in-memory and memory-mapped data."""
+        if not batch:
+            return torch.Tensor(), torch.Tensor()
+            
+        if isinstance(batch[0], (list, tuple)) and len(batch[0]) == 2:
+            Vs, psis = zip(*batch)
+        else:
+            Vs, psis = batch, batch
+            
+        def ensure_tensor(x):
+            if isinstance(x, np.ndarray):
+                return torch.from_numpy(x)
+            elif torch.is_tensor(x):
+                return x
+            else:
+                return torch.tensor(x)
+                
+        V_batch = torch.stack([ensure_tensor(V) for V in Vs])
+        psi_batch = torch.stack([ensure_tensor(psi) for psi in psis])
+        
+        # Ensure correct shapes [batch_size, seq_len, 1]
+        if V_batch.dim() == 2:
+            V_batch = V_batch.unsqueeze(-1)
+        if psi_batch.dim() == 2:
+            psi_batch = psi_batch.unsqueeze(-1)
+            
+        return V_batch, psi_batch
+
+    def on_init(self, model):
+        super().on_init(model)
+        print(f"[SillyAITrainerPlugin] Initialized for model: {type(model).__name__}")
+
+    def on_enable(self):
+        super().on_enable()
+        print("[SillyAITrainerPlugin] Enabled!")
+
+    def on_disable(self):
+        super().on_disable()
+        print("[SillyAITrainerPlugin] Disabled!")
+
+    def on_epoch_start(self, epoch):
+        print(f"[SillyAITrainerPlugin] Epoch {epoch} started.")
+
+    def on_epoch_end(self, epoch, metrics):
+        print(f"[SillyAITrainerPlugin] Epoch {epoch} ended. Metrics: {metrics}")

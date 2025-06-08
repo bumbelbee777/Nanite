@@ -1,383 +1,433 @@
+from __future__ import annotations
+
+import asyncio
+import copy
+import logging
+import random
+from collections import Counter, defaultdict, deque
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 import pytest
 import torch
-import cmath
-import math
-import os
+import torch.nn.functional as F
+from torch import nn, linalg as LA
 import numpy as np
-import torch.nn as nn
-from torch import serialization
-from sillyai.api import SillyAI, ModelConfig
-from sillyai.graph.concept import ConceptGraph
-from sillyai.plugins.plugin import SillyPlugin
-from sillyai.core.transformer import DynamicActivation
-from sillyai.core.complex.norms import ComplexLayerNorm
 
-# Add both ModelConfig and ConceptGraph to safe globals at the start
-serialization.add_safe_globals([ModelConfig, ConceptGraph])
+from sillyai.config import ModelConfig, PrecisionLevel, Modality
+from sillyai.core import (
+    ComplexLayerNorm,
+    DynamicActivation,
+    FeatureRouter,
+    LinearLayer,
+    MultivectorOps,
+    TaskComplexityEstimator,
+    TransformerBlock,
+    Transformer,
+    TransformerLayer,
+    PositionalEncoding,
+    ComplexMLP,
+    LayerNorm
+)
+from sillyai.model import SillyAI
+from sillyai.ops import AsyncLRUTensorCache
+from sillyai.concept import ConceptGraph
+from sillyai.loss import ComplexLoss
+from sillyai.plugins.trainer import SillyAITrainerPlugin
 
-def complex_abs(z):
-    return abs(z)
+class TestConceptGraph:
+    def test_add_concept(self):
+        graph = ConceptGraph()
+        graph.add_concept("apple")
+        assert "apple" in graph.concepts
+        assert graph.concepts["apple"].energy == 0
+        assert graph.concepts["apple"].last_access_time == 0
+        assert graph.concepts["apple"].access_count == 0
 
-def complex_sin(z):
-    return cmath.sin(z)
+    def test_add_connection(self):
+        graph = ConceptGraph()
+        graph.add_concept("apple")
+        graph.add_concept("fruit")
+        graph.add_edge("apple", "fruit")
+        assert any(
+            conn.target == "fruit" for conn in graph.adj["apple"]
+        )
+        assert any(
+            conn.target == "apple" for conn in graph.adj["fruit"]
+        )
 
-def generate_complex_inputs(num_samples, real_range=(-1.0, 1.0), imag_range=(-1.0, 1.0)):
-    real_part = torch.rand(num_samples) * (real_range[1] - real_range[0]) + real_range[0]
-    imag_part = torch.rand(num_samples) * (imag_range[1] - imag_range[0]) + imag_range[0]
-    return torch.stack([real_part, imag_part], dim=-1)
+    def test_propagate_energy(self):
+        graph = ConceptGraph()
+        graph.add_concept("apple")
+        graph.add_concept("fruit")
+        graph.add_concept("red")
+        graph.add_edge("apple", "fruit")
+        graph.add_edge("fruit", "red")
+        graph.concepts["apple"].energy = 1.0
+        graph.propagate_energy()
+        assert graph.concepts["fruit"].energy > 0
+        assert graph.concepts["red"].energy > 0
+        assert graph.concepts["apple"].energy < 1.0
 
-def generate_complex_data(n_samples=1000):
-    """Generate complex-valued test data points"""
-    # Generate points in a grid on the complex plane
-    real = np.linspace(-2, 2, int(np.sqrt(n_samples)))
-    imag = np.linspace(-2, 2, int(np.sqrt(n_samples)))
-    x, y = np.meshgrid(real, imag)
-    z = x + 1j * y
-    z = z.flatten()
-    
-    return torch.tensor(np.stack([z.real, z.imag], axis=-1), dtype=torch.float32)
+    def test_update_access(self):
+        graph = ConceptGraph()
+        graph.add_concept("apple")
+        graph.concepts["apple"].access_count +=1
+        assert graph.concepts["apple"].access_count == 1
+        assert graph.concepts["apple"].last_access_time == 0
+        graph.concepts["apple"].access_count += 1
+        graph.concepts["apple"].last_access_time += 1
+        assert graph.concepts["apple"].access_count == 2
+        assert graph.concepts["apple"].last_access_time == 1
 
-@pytest.fixture
-def base_config():
-    return ModelConfig(
-        # Core model dimensions
-        input_dim=1,
-        d_model=32,
-        num_layers=2,
-        nhead=2,
-        dim_ff=64,
-        output_dim=1,
-        concept_dim=16,
+    def test_update_n_cluster(self):
+        graph = ConceptGraph()
+        graph.add_concept("A")
+        graph.add_concept("B")
+        graph.add_concept("C")
+        graph.add_edge("A", "B")
+        graph.add_edge("B", "C")
+        graph.concepts["A"].energy = 1.0
+        graph.propagate_energy()
+        graph.concepts["A"].access_count +=1  # Increase access for 'A'
+        graph.update_n_cluster = lambda min_energy, purge_threshold : graph.prune(energy_thresh=min_energy, access_thresh=purge_threshold)
+        graph.update_n_cluster(min_energy=0.1, purge_threshold=2)  # Assuming at least 3 concepts, keeping top 2
+        assert len(graph.concepts) <= 2  # Should have pruned at least one
+
+    def test_example_concepts(self):
+        graph = ConceptGraph(decay_rate=0.8)
+        graph.add_concept("apple")
+        graph.add_concept("fruit")
+        graph.add_concept("red")
+
+        graph.concepts["apple"].access_count +=1
+        graph.concepts["fruit"].access_count +=1
+        graph.concepts["red"].access_count +=1  # Red is most frequently accessed
+
+        graph.add_edge("apple", "fruit", weight=0.8, relationship="is_a")
+        graph.add_edge("fruit", "red", weight=0.5, relationship="color")
+
+        graph.concepts["apple"].energy = 1.0
+        graph.propagate_energy()
+
+        assert graph.concepts["fruit"].energy > 0
+        assert graph.concepts["red"].energy > 0
+        graph.update_n_cluster = lambda min_energy, purge_threshold : graph.prune(energy_thresh=min_energy, access_thresh=purge_threshold)
+        graph.update_n_cluster(min_energy=0.1, purge_threshold=2)
+
+        assert "red" in graph.concepts
+        assert len(graph.concepts) >= 1
+
+        graph.add_concept("sweet")
+        graph.add_edge("apple", "sweet", weight=0.7, relationship="taste")
+        assert any(
+            conn.target == "sweet" for conn in graph.adj["apple"]
+        )
+
+        graph.propagate_energy()
+        graph.update_n_cluster(min_energy=0.05, purge_threshold=2)
+        assert len(graph.concepts) <= 3
+
+class TestModelComponents:
+    @pytest.mark.asyncio
+    async def test_cache_put_get_roundtrip(self):
+        # small cache, INT4 quantization
+        cache = AsyncLRUTensorCache(
+            max_size_bytes=1024 * 1024,
+            quant_precision=PrecisionLevel.INT4,
+            decomp_threshold=10_000,  # low threshold so no SVD
+            decomp_gain_ratio=0.1,
+        )
+
+        t = torch.randn(16, 16)  # real tensor
+        # store under key ("foo", 123)
+        await cache.put("foo", t, (123,))
+        out = await cache.get("foo", (123,))
+        assert out is not None
+        # because we quantize to INT4 then dequantize,
+        # we allow some tolerance
+        torch.testing.assert_allclose(out, t, atol=1e-1, rtol=1e-1)
+
+        # missing key
+        miss = await cache.get("nope", (0,))
+        assert miss is None
+
+    @pytest.mark.asyncio
+    async def test_cache_eviction_lru_lfu(self):
+        # capacity for only two small tensors
+        cache = AsyncLRUTensorCache(
+            max_size_bytes=500,  # very small
+            quant_precision=PrecisionLevel.INT4,
+        )
+
+        a = torch.ones(10, 10) * 1
+        b = torch.ones(10, 10) * 2
+        c = torch.ones(10, 10) * 3
+
+        await cache.put("a", a,())
+        await cache.put("b", b,())
+        # both fit
+        assert await cache.get("a",()) is not None
+        assert await cache.get("b",()) is not None
+
+        await cache.put("c", c, ())  # should evict either 'a' or 'b'
+        remaining = [key for key, _ in cache.cache.items()]
+        assert len(remaining) == 2
+        assert "c" in remaining
+
+    @pytest.mark.asyncio
+    async def test_optimized_complex_ops_matmul_and_fft(self):
+        ops = MultivectorOps(cache_max_bytes=1 << 20)
+
+        # test matmul
+        a = torch.randn(4, 4, dtype=torch.complex64)
+        b = torch.randn(4, 4, dtype=torch.complex64)
+        out = await ops.matmul(a, b)
+        torch.testing.assert_allclose(out, torch.matmul(a, b), atol=1e-6)
+
+        # test fft / ifft roundtrip
+        x = torch.randn(16, dtype=torch.complex64)
+        X = await ops.fft(x)
+        x_back = await ops.ifft(X)
+        torch.testing.assert_allclose(x_back, x, atol=1e-6)
+
+    @pytest.mark.asyncio
+    async def test_optimized_complex_ops_conv1d(self):
+        ops = MultivectorOps(cache_max_bytes=1 << 20)
+
+        # use real dtype for conv1d, since F.conv1d doesn't support complex by default
+        x = torch.randn(2, 3, 8)
+        w = torch.randn(4, 3, 3)
+        out = await ops.conv1d(x, w)
+        expected = F.conv1d(x, w)
+        assert out.shape == expected.shape
+        torch.testing.assert_allclose(out, expected, atol=1e-6)
         
-        # Optimization parameters
-        factorized_linear=False,
-        kronecker_rank=4,
-        toeplitz_complex_method='fft',
-        weight_init='xavier',
+class TestTransformerComponents:
+    def test_positional_encoding(self):
+        config = ModelConfig(
+            d_model=64,
+            max_seq_len=32,
+            device='cpu'
+        )
+        pos_enc = PositionalEncoding(config)
         
-        # InfiniToeplitz parameters
-        infini_local_window=512,
-        infini_mem_size=1024,
-        infini_compress_ratio=4,
+        # Test forward pass
+        x = torch.randn(16, 32, 64)  # [batch_size, seq_len, d_model]
+        output = pos_enc(x)
         
-        # Training parameters
-        mixed_precision=True,
-        snapshot_dir="./test_snapshots",
-        keep_best_only=True,
+        assert output.shape == x.shape
+        assert not torch.isnan(output).any()
+        assert not torch.isinf(output).any()
         
-        # Plugin configuration
-        plugin_dir="./test_plugins",
+    def test_transformer_layer(self):
+        config = ModelConfig(
+            d_model=64,
+            n_heads=4,
+            d_ff=128,
+            dropout=0.1,
+            device='cpu'
+        )
+        ops = MultivectorOps()
+        layer = TransformerLayer(config, ops)
         
-        # Optional parameters with defaults
-        optim_args={
-            'use_toeplitz': True,
-            'factorized_linear': False,
-            'mixed_precision': True
+        # Test forward pass
+        x = torch.randn(16, 32, 64)  # [batch_size, seq_len, d_model]
+        output = layer(x)
+        
+        assert output.shape == x.shape
+        assert not torch.isnan(output).any()
+        assert not torch.isinf(output).any()
+        
+    def test_complex_mlp(self):
+        config = ModelConfig(
+            d_model=64,
+            d_ff=128,
+            dropout=0.1,
+            device='cpu'
+        )
+        ops = MultivectorOps()
+        mlp = ComplexMLP(config, ops)
+        
+        # Test forward pass
+        x = torch.randn(16, 32, 64)  # [batch_size, seq_len, d_model]
+        output = mlp(x)
+        
+        assert output.shape == x.shape
+        assert not torch.isnan(output).any()
+        assert not torch.isinf(output).any()
+
+class TestComplexLoss:
+    def test_complex_loss_with_real_target(self):
+        criterion = ComplexLoss()
+        
+        # Create complex prediction and real target
+        pred = torch.complex(
+            torch.randn(16, 32, 64),
+            torch.randn(16, 32, 64)
+        )
+        target = torch.randn(16, 32, 64)
+        
+        # Compute loss
+        loss = criterion(pred, target)
+        
+        assert isinstance(loss, torch.Tensor)
+        assert loss.ndim == 0  # Scalar
+        assert not torch.isnan(loss)
+        assert not torch.isinf(loss)
+        assert loss >= 0
+        
+    def test_complex_loss_with_complex_target(self):
+        criterion = ComplexLoss()
+        
+        # Create complex prediction and target
+        pred = torch.complex(
+            torch.randn(16, 32, 64),
+            torch.randn(16, 32, 64)
+        )
+        target = torch.complex(
+            torch.randn(16, 32, 64),
+            torch.randn(16, 32, 64)
+        )
+        
+        # Compute loss
+        loss = criterion(pred, target)
+        
+        assert isinstance(loss, torch.Tensor)
+        assert loss.ndim == 0  # Scalar
+        assert not torch.isnan(loss)
+        assert not torch.isinf(loss)
+        assert loss >= 0
+        
+    def test_complex_loss_with_concept_graph(self):
+        # Create a simple concept graph
+        concept_graph = {
+            'concept1': {'energy': 0.5, 'frequency': 1},
+            'concept2': {'energy': 0.3, 'frequency': 2}
         }
-    )
-
-def test_sillyai_initialization(base_config):
-    config = base_config
-
-    # Test with different num_layers
-    config.num_layers = 4
-    model_layers = SillyAI(config)
-    assert len(model_layers.layers) == 4
-
-def test_complex_function_approximation():
-    """Test SillyAI's ability to approximate complex functions sin(z) and abs(z)"""
-    
-    # Create model config
-    config = ModelConfig(
-        input_dim=2,          # Real and imaginary components
-        output_dim=2,         # Real and imaginary output
-        concept_dim=32,       # Dimension for concept embeddings
-        d_model=64,           # Model dimension
-        num_layers=3,         # Number of transformer layers
-        nhead=4,              # Number of attention heads
-        dim_ff=128,          # Feed-forward dimension
-        factorized_linear=True,
-        kronecker_rank=4
-    )
-    
-    # Initialize model
-    model = SillyAI(config)
-    
-    # Generate training data
-    z = generate_complex_data(1000)
-    # Reshape to [batch, seq_len=1, input_dim, 2]
-    z = z.unsqueeze(1)
-    
-    # Compute target values for sin(z)
-    z_complex = torch.complex(z[..., 0], z[..., 1])
-    sin_z = torch.sin(z_complex)
-    y_sin = torch.stack([sin_z.real, sin_z.imag], dim=-1)
-    
-    # Compute target values for abs(z)
-    abs_z = torch.abs(z_complex)
-    y_abs = torch.stack([abs_z, torch.zeros_like(abs_z)], dim=-1)
-    
-    # Train model on sin(z)
-    losses_sin = []
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    
-    for epoch in range(100):
-        optimizer.zero_grad()
-        out_sin = model(z)
-        loss = nn.MSELoss()(out_sin, y_sin)
-        loss.backward()
-        optimizer.step()
-        losses_sin.append(loss.item())
-    
-    # Verify sin(z) approximation
-    with torch.no_grad():
-        pred_sin = model(z)
-        error_sin = torch.mean(torch.abs(pred_sin - y_sin))
-        assert error_sin < 0.1, f"Sin(z) approximation error too high: {error_sin}"
-    
-    # Reset model and train on abs(z)
-    model = SillyAI(config)
-    losses_abs = []
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    
-    for epoch in range(100):
-        optimizer.zero_grad()
-        out_abs = model(z)
-        loss = nn.MSELoss()(out_abs, y_abs)
-        loss.backward()
-        optimizer.step()
-        losses_abs.append(loss.item())
-    
-    # Verify abs(z) approximation
-    with torch.no_grad():
-        pred_abs = model(z)
-        error_abs = torch.mean(torch.abs(pred_abs - y_abs))
-        assert error_abs < 0.1, f"Abs(z) approximation error too high: {error_abs}"
-    
-    # Check convergence
-    assert losses_sin[-1] < losses_sin[0], "Loss did not decrease for sin(z)"
-    assert losses_abs[-1] < losses_abs[0], "Loss did not decrease for abs(z)"
-    
-    # Test model properties
-    assert model.config.input_dim == 2
-    assert model.config.output_dim == 2
-    assert isinstance(model(z), torch.Tensor)
-    assert model(z).shape == (1000, 1, 2, 2)  # [batch, seq_len, output_dim, 2]
-
-def test_concept_graph_integration(base_config):
-    model = SillyAI(base_config)
-    
-    # Test concept graph initialization
-    assert hasattr(model, 'concept_graph')
-    assert isinstance(model.concept_graph, ConceptGraph)
-    
-    # Test concept addition and energy propagation
-    model.concept_graph.add_concept("test_concept1")
-    model.concept_graph.add_concept("test_concept2")
-    model.concept_graph.add_connection("test_concept1", "test_concept2", weight=0.8)
-    
-    model.concept_graph.concepts["test_concept1"].energy = 1.0
-    model.concept_graph.propagate_energy()
-    
-    assert model.concept_graph.concepts["test_concept2"].energy > 0
-
-def test_plugin_system(base_config):
-    class TestPlugin(SillyPlugin):
-        def name(self) -> str:
-            return "test_plugin"
-            
-        def before_forward(self, model, x):
-            return x * 2  # Multiply input by 2
-    
-    # Create test plugin directory and add plugin
-    os.makedirs("test_plugins", exist_ok=True)
-    
-    config = base_config
-    config.plugin_dir = "test_plugins"
-    model = SillyAI(config)
-    
-    # Manually add plugin for testing
-    plugin = TestPlugin()
-    model.plugin_manager.plugins.append(plugin)
-    
-    # Test plugin effect
-    x = torch.ones(1, 1, model.config.d_model * 2)
-    modified_x = model.plugin_manager.apply_before_forward(model, x)
-    assert torch.all(modified_x == 2)
-
-def test_vm_integration(base_config):
-    model = SillyAI(base_config)
-    
-    # Test VM initialization
-    assert hasattr(model, 'vm')
-    
-    # Test proof verification with simple bytecode
-    proof_code = """
-    .TestProof() {
-        %x: r0<int> = 1
-        %y: r1<int> = 1
-        %result: r2<bool>
-        IFF x, y, result  // Compare x and y
-        ASSERT result     // Assert they are equal
-        HLT
-    }
-    TestProof()
-    """
-    
-    assert model._verify_proof_code(proof_code)
-
-def test_snapshot_management(base_config):
-    model = SillyAI(base_config)
-    
-    # Test snapshot saving with weights_only=False for backward compatibility
-    test_loss = 0.5
-    os.makedirs(base_config.snapshot_dir, exist_ok=True)
-    snapshot_path = os.path.join(base_config.snapshot_dir, f"{model.__class__.__name__}_best.pt.gz")
-    model.save_snapshot(test_loss)
-    
-    # Test loading snapshot
-    loaded_model = SillyAI(base_config)
-    loaded_model.load_snapshot(snapshot_path)
-    assert loaded_model.best_loss == test_loss
-
-    # Cleanup
-    if os.path.exists(snapshot_path):
-        os.remove(snapshot_path)
-    os.rmdir(base_config.snapshot_dir)
-
-def test_infini_attention(base_config):
-    model = SillyAI(base_config)
-    
-    # Test with infini_local_window
-    assert hasattr(model.layers[0].attn, 'chunk_size')
-    assert model.layers[0].attn.chunk_size == base_config.infini_local_window
-    assert hasattr(model.layers[0].attn, 'mem_k')
-    assert model.layers[0].attn.mem_k.size(0) == 1
-    
-    # Test forward pass with complex inputs
-    batch_size = 2
-    seq_len = 6
-    d_model = base_config.d_model
-
-    x = torch.randn(batch_size, seq_len, d_model, 2)
-    
-    # Forward pass 
-    output = model(x)
-    expected_output_dim = base_config.output_dim
-    assert output.shape == (batch_size, seq_len, expected_output_dim, 2)
-
-    # Test memory mechanism
-    # Do another forward pass to check memory updates
-    new_output = model(x)
-    assert model.layers[0].attn.mem_k.size(0) == 1  # Memory is maintained
-    assert model.layers[0].attn.mem_v.size(0) == 1
-
-    # Test compression by doing multiple passes
-    for _ in range(5):
-        model(x)
-    # Memory should stay within bounds
-    assert model.layers[0].attn.mem_k.size(0) <= base_config.infini_mem_size
-
-def test_hybrid_loss_and_concept_alignment(base_config):
-    model = SillyAI(base_config)
-    
-    # Setup test data
-    batch_size = 2
-    seq_len = 4
-    d_model = base_config.d_model
-    
-    # Create complex inputs and targets
-    x = torch.randn(batch_size, seq_len, d_model, 2)  # [B, L, D, 2]
-    targets = torch.randn(batch_size, seq_len, base_config.output_dim, 2)
-    
-    # Add some concepts and set energies
-    model.concept_graph.add_concept("test1")
-    model.concept_graph.add_concept("test2")
-    model.concept_graph.concepts["test1"].energy = 0.8
-    model.concept_graph.concepts["test2"].energy = 0.5
-    
-    # Test hybrid loss computation
-    loss = model.hybrid_loss(x, targets)
-    assert isinstance(loss, torch.Tensor)
-    assert loss.ndim == 0  # Scalar loss
-    assert loss.item() >= 0
-    
-    # Test concept alignment loss separately
-    align_loss = model.concept_alignment_loss(x)
-    assert isinstance(align_loss, torch.Tensor)
-    assert align_loss.ndim == 0
-    
-    # Verify concept projector is working
-    proj = model.concept_projector(x)
-    assert proj.shape == (batch_size * seq_len, base_config.concept_dim, 2)
-
-def test_complex_components(base_config):
-    model = SillyAI(base_config)
-    
-    # Test input shapes
-    batch_size = 2
-    seq_len = 4
-    d_model = base_config.d_model
-    
-    # Create complex input: [B, L, D, 2]
-    x = torch.randn(batch_size, seq_len, d_model, 2)
-    
-    # Test DynamicActivation in transformer blocks
-    for layer in model.layers:
-        # DynamicActivation is used in feed-forward when not in real mode
-        assert isinstance(layer.ff.activation, DynamicActivation)
         
-        # Test activation forward pass
-        ff_out = layer.ff(x)
-        assert ff_out.shape == x.shape
+        criterion = ComplexLoss(concept_graph=concept_graph, alpha=0.1, beta=0.01)
         
-        # ComplexLayerNorm should be used
-        assert isinstance(layer.norm1, ComplexLayerNorm)
-        assert isinstance(layer.norm2, ComplexLayerNorm)
+        # Create complex prediction and real target
+        pred = torch.complex(
+            torch.randn(16, 32, 64),
+            torch.randn(16, 32, 64)
+        )
+        target = torch.randn(16, 32, 64)
         
-        # Test layer norm with separate real and imaginary parts
-        norm_out = layer.norm1(x)
-        assert norm_out.shape == x.shape
-        real_mean = norm_out[..., 0].mean(dim=-1)
-        real_std = norm_out[..., 0].std(dim=-1)
-        imag_mean = norm_out[..., 1].mean(dim=-1)
-        imag_std = norm_out[..., 1].std(dim=-1)
+        # Compute loss
+        loss = criterion(pred, target)
         
-        # Verify normalization properties for both real and imaginary parts
-        assert torch.allclose(real_mean, torch.zeros_like(real_mean), atol=1e-6)
-        assert torch.allclose(imag_mean, torch.zeros_like(imag_mean), atol=1e-6)
-        assert torch.allclose(real_std, torch.ones_like(real_std), atol=1e-6)
-        assert torch.allclose(imag_std, torch.ones_like(imag_std), atol=1e-6)
+        assert isinstance(loss, torch.Tensor)
+        assert loss.ndim == 0  # Scalar
+        assert not torch.isnan(loss)
+        assert not torch.isinf(loss)
+        assert loss >= 0
 
-def test_feature_routing(base_config):
-    model = SillyAI(base_config)
-    
-    # Test input dimensions
-    batch_size = 2
-    seq_len = 4
-    d_model = base_config.d_model
-    
-    # Test with complex input
-    x = torch.randn(batch_size, seq_len, d_model, 2)
-    
-    # Get positional encoding from model
-    pos_enc = model.pos_enc(x)
-    
-    # Pass pos_enc module to FeatureRouter
-    encoded = model.pos_enc_router(x, model.pos_enc)
-    assert encoded.shape == (batch_size, seq_len, d_model, 2)
-    
-    # Test TaskComplexityEstimator
-    complexity_score = model.complexity_estimator(x)
-    assert complexity_score.shape == (batch_size,)
-    assert torch.all((complexity_score >= 0) & (complexity_score <= 1))
-    
-    # Test complexity estimation with different input patterns
-    x_complex = torch.randn(batch_size, seq_len, d_model, 2) * 2.0
-    x_simple = torch.ones(batch_size, seq_len, d_model, 2) * 0.1
-    
-    score_complex = model.complexity_estimator(x_complex)
-    score_simple = model.complexity_estimator(x_simple)
-    
-    # Verify that more varied input has higher complexity score
-    assert torch.mean(score_complex) > torch.mean(score_simple)
+class TestSillyAIModel:
+    def test_model_initialization(self):
+        config = ModelConfig(
+            input_dim=1,
+            output_dim=1,
+            d_model=64,
+            d_ff=128,
+            n_heads=4,
+            n_layers=2,
+            max_seq_len=64,
+            dropout=0.2,
+            device='cpu',
+            precision=PrecisionLevel.TERNARY,
+            concept_graph_size=500,
+            supported_modalities={Modality.TEXT, Modality.IMAGE},
+            enabled_plugins=['trainer', 'visualizer']
+        )
+        
+        ops = MultivectorOps()
+        model = SillyAI(config, ops=ops)
+        
+        assert isinstance(model, SillyAI)
+        assert model.config == config
+        assert model.ops == ops
+        
+    @pytest.mark.asyncio
+    async def test_model_forward(self):
+        config = ModelConfig(
+            input_dim=1,
+            output_dim=1,
+            d_model=64,
+            d_ff=128,
+            n_heads=4,
+            n_layers=2,
+            max_seq_len=64,
+            dropout=0.2,
+            device='cpu'
+        )
+        
+        ops = MultivectorOps()
+        model = SillyAI(config, ops=ops)
+        
+        # Test forward pass
+        x = torch.randn(16, 64, 1)  # [batch_size, seq_len, input_dim]
+        output = await model.transformer(x)
+        
+        assert output.shape == (16, 64, 1)  # [batch_size, seq_len, output_dim]
+        assert not torch.isnan(output).any()
+        assert not torch.isinf(output).any()
+        
+    @pytest.mark.asyncio
+    async def test_model_training(self):
+        config = ModelConfig(
+            input_dim=1,
+            output_dim=1,
+            d_model=64,
+            d_ff=128,
+            n_heads=4,
+            n_layers=2,
+            max_seq_len=64,
+            dropout=0.2,
+            device='cpu'
+        )
+        
+        ops = MultivectorOps()
+        model = SillyAI(config, ops=ops)
+        trainer = SillyAITrainerPlugin(config)
+        
+        # Create dummy dataset
+        class DummyDataset(torch.utils.data.Dataset):
+            def __init__(self, size=100):
+                self.size = size
+                
+            def __len__(self):
+                return self.size
+                
+            def __getitem__(self, idx):
+                x = torch.randn(64, 1)
+                y = torch.randn(64, 1)
+                return x, y
+                
+        # Setup trainer
+        train_dataset = DummyDataset(100)
+        val_dataset = DummyDataset(20)
+        trainer.setup(
+            model=model,
+            ops=ops,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            batch_size=16,
+            seq_len=64,
+            lr=1e-3,
+            epochs=2,
+            early_stop=3,
+            weight_decay=1e-4
+        )
+        
+        # Test training
+        train_loss = await trainer.train_epoch()
+        val_loss = await trainer.validate()
+        
+        assert isinstance(train_loss, float)
+        assert isinstance(val_loss, float)
+        assert not np.isnan(train_loss)
+        assert not np.isnan(val_loss)
+        assert train_loss >= 0
+        assert val_loss >= 0

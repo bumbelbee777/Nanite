@@ -1,0 +1,14 @@
+pytest
+torch>=2.0.0
+torchvision
+numpy>=1.21.0
+numba
+gensim
+matplotlib>=3.4.0
+seaborn>=0.11.0
+psutil>=5.8.0
+gputil>=1.4.0
+networkx>=2.6.0
+pillow>=8.0.0
+rich>=10.0.0
+tk>=0.1.0

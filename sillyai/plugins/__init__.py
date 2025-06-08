@@ -1,4 +1,6 @@
-"""Plugin system for extending SillyAI functionality."""
-from .plugin import SillyPlugin, PluginManager
+"""SillyAI plugins package."""
 
-__all__ = ['SillyPlugin', 'PluginManager']
+from .trainer import SillyAITrainerPlugin
+from .visualizer import SillyAIVisualizerPlugin
+
+__all__ = ['SillyAITrainerPlugin', 'SillyAIVisualizerPlugin'] 

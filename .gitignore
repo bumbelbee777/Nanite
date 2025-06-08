@@ -1,3 +1,5 @@
+build/
+dist/
 __pycache__/
 .idx/
 .vscode/
@@ -6,3 +8,11 @@ sillyai.egg-info/
 snapshots/
 sillyai.egg-info/SOURCES.txt
 .pytest_cache/
+best*.pt
+cache_chunks/
+debug.log
+logs/
+visualizations/
+profiles/
+wavefunctions/
+checkpoints/

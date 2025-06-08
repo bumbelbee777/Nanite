@@ -1,9 +1,119 @@
-# SillyAI
+# 🎮 SillyAI - A Leap Towards AGI?
 
-SillyAI is an advanced, complex-valued transformer model that leverages the power of complex numbers for deep learning. By operating natively in complex space, SillyAI can capture richer patterns and relationships that are often missed by traditional real-valued models. The complex-valued architecture enables it to encode both magnitude and phase information, making it particularly well-suited for tasks involving signal processing, quantum physics simulations, and other domains where phase relationships are important.
+<div align="center">
 
-SillyAI introduces innovative features like concept graphing, enabling it to visualize and understand the relationships between concepts with a weighting mechanism based on energy values. This graph dynamically updates through an LFU algorithm, thereby improving its reasoning capabilities over time.
+*A neuro-symbolic complex-valued transformer model pushing the boundaries of AI architecture*
 
-To allow for more efficient and optimized reasoning and problem-solving, SillyAI uses the SILLY custom ISA to build high-level assembler corresponding to proofs or in general, steps to solving problems in a reliable manner.
+</div>
 
-Finally, SillyAI's architecture is highly minimalistic and modular, allowing for features to be turned on and off easily and nicely. It can also be extended thanks to its plugin system which allows for dynamic loading/unloading on demand.
+**⚠️WARNING⚠️** The model is mostly untested outside of simple cases. Expect bugs and other unintended behavior! Contributions are more than welcome!
+
+## 🌟 Overview
+
+SillyAI is a complex-valued neuro-symbolic transformer model that combines systems design principles with modern deep learning techniques and reasoning engines. Its unique architecture sets it apart from other models, making it particularly powerful for fields such as reasoning, physics simulations, and quantum system analysis.
+
+<div align="center">
+  <img src="media/wavefunction_evolution.gif" alt="Wavefunction Evolution" width="600"/>
+  <br>
+  <em>Real-time visualization of wavefunction evolution during training</em>
+</div>
+
+<div align="center">
+    <img src="media/resource_usage.png" alt="Resource Usage When Training" width="600"/>
+    <br>
+    <em>Resource usage while training</em>
+</div>
+
+## 🚀 Unconventional Architecture
+
+### 🧮 InfiniToeplitz Attention
+- Infinite context window through structured matrix compression
+- Dynamic key-value pair streaming and compression
+- Support for various matrix structures (Toeplitz, block Toeplitz, Kronecker, circulant, etc.)
+- Eliminates traditional context limitations
+
+### 🧠 Concept Graph System
+- Energy-weighted concept relationships
+- Dynamic LFU-based updates and pruning
+- Concept tagging and aliasing
+- Entangled concept relationships
+- Field-specific subgraphs
+- Bytecode generation from graph traversal
+
+### 💾 Performance Optimizations
+- LZ4 compression for efficient storage
+- Lock-free async operations
+- Batched I/O operations
+- SVD decomposition for dimensionality reduction
+- Dynamic ternary to FP16 quantization
+- Geometric algebra optimizations
+- JIT compilation of critical paths
+
+### 🎯 Advanced Features
+- Complex-valued parametric ReLU with phase preservation
+- Multi-token async prediction
+- Response synthesis through candidate scoring
+- Task complexity-based routing
+- Self-training capabilities
+- Dynamic plugin system
+- VLIW/EPIC bytecode VM for reasoning
+
+## 🛠️ Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/bumbelbee777/sillyai.git
+cd sillyai
+
+# Create a virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+## 🎮 Quick Start
+
+```python
+from sillyai import SillyAI, ModelConfig
+from sillyai.ops import MultivectorOps
+
+# Initialize configuration
+config = ModelConfig(
+    d_model=64,
+    n_heads=4,
+    n_layers=2,
+    max_seq_len=64
+)
+
+# Create model
+model = SillyAI(config, ops=MultivectorOps().compile())
+
+# Train the model
+model.train()
+```
+
+## 🎯 Some Use Cases
+
+- Quantum system simulation
+- Wavefunction prediction
+- Physics-based learning
+- Signal processing
+- Complex system modeling
+- Equation solving
+- NLP
+
+## 🤝 Contributing
+
+We welcome all contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+
+## 📝 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- PyTorch team for the amazing deep learning framework
+- Google's InfiniContext paper for the attention layer inspiration
+- AlphaZero for self-learning
