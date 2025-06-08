@@ -1,28 +1,17 @@
 import torch
-from torch.utils.data import Dataset, DataLoader
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts
-import torch.nn as nn
+from torch.utils.data import Dataset
 import numpy as np
 import os
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-import threading
-import queue
-from datetime import timedelta
 import time
 from rich.console import Console
-from rich.live import Live
-from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 from rich.panel import Panel
-from rich.layout import Layout
-from rich import box
 import matplotlib
+import asyncio
 matplotlib.use('Agg')  # Use non-interactive backend
 
 from .model import SillyAI
 from .config import ModelConfig, PrecisionLevel, Modality
-from .utils import ChunkedMMapDataset, IterableMMapDataset, CACHE_DIR
 from .ops import MultivectorOps
 from .plugins.trainer import SillyAITrainerPlugin
 from .plugins.visualizer import SillyAIVisualizerPlugin, ModelProfiler
@@ -164,7 +153,7 @@ class SchrödingerDataset(Dataset):
         V, psi = self._make_sample()
         return torch.tensor(V), torch.tensor(psi)
 
-def main():
+async def main():
     console = Console()
     console.print(Panel.fit(
         "[bold blue]SillyAI[/bold blue] - Quantum Wavefunction Learning",
@@ -201,212 +190,232 @@ def main():
     
     # Initialize ops and model
     ops = MultivectorOps()
+    await ops.cache.start()  # Start the cache worker
     model = SillyAI(config, ops=ops)
     
-    # Curriculum learning parameters
-    num_difficulty_levels = 3
-    epochs_per_level = 7
-    total_epochs = num_difficulty_levels * epochs_per_level
-    
-    # Initialize dynamic learning rate manager
-    lr_manager = DynamicLearningRate(
-        initial_lr=5e-4,
-        min_lr=1e-6,
-        max_lr=1e-3,
-        warmup_steps=100,
-        reward_factor=1.1,
-        punishment_factor=0.9,
-        patience=3,
-        min_delta=1e-4
-    )
-    
-    # Initialize trainer plugin with improved settings
-    trainer = SillyAITrainerPlugin(config)
-    
-    # Initialize visualizer plugin and profiler
-    visualizer = SillyAIVisualizerPlugin()
-    visualizer.on_init(model)
-    profiler = ModelProfiler(save_dir="profiles")
-    
-    # Create directories for visualizations
-    os.makedirs("profiles", exist_ok=True)
-    os.makedirs("wavefunctions", exist_ok=True)
-    
-    # Load existing weights if found
-    if os.path.exists('best.pt'):
-        console.print("[green]💾 Found existing model checkpoint[/green]")
-        try:
-            # Load checkpoint
-            checkpoint = torch.load('best.pt')
-            
-            # Check if it's a state dict or full checkpoint
-            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                state_dict = checkpoint['model_state_dict']
-            else:
-                state_dict = checkpoint
-                
-            # Filter out size mismatches
-            model_state_dict = model.state_dict()
-            filtered_state_dict = {
-                k: v for k, v in state_dict.items() 
-                if k in model_state_dict and v.shape == model_state_dict[k].shape
-            }
-            
-            # Load compatible weights
-            model.load_state_dict(filtered_state_dict, strict=False)
-            
-            # Log loaded parameters
-            console.print("\n[cyan]Model State Summary:[/cyan]")
-            for name, param in model.named_parameters():
-                console.print(f"  {name}: shape={param.shape}, mean={param.mean().item():.4f}, std={param.std().item():.4f}")
-                
-            # Log any mismatched parameters
-            missing_keys = set(model_state_dict.keys()) - set(filtered_state_dict.keys())
-            if missing_keys:
-                console.print("\n[yellow]⚠️ Some parameters were not loaded due to size mismatch:[/yellow]")
-                for key in missing_keys:
-                    console.print(f"  {key}: expected {model_state_dict[key].shape}, got {state_dict[key].shape if key in state_dict else 'missing'}")
-        except Exception as e:
-            console.print(f"[red]⚠️ Error loading model: {str(e)}[/red]")
-            console.print("[yellow]⚠️ Training from scratch[/yellow]")
-    else:
-        console.print("[yellow]⚠️ No existing model found, training from scratch[/yellow]")
-
-    # Train the model with progress tracking
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TimeElapsedColumn(),
-    ) as progress:
-        # Create main task
-        task = progress.add_task("[cyan]Training...", total=total_epochs)
+    try:
+        # Curriculum learning parameters
+        num_difficulty_levels = 3
+        epochs_per_level = 7
+        total_epochs = num_difficulty_levels * epochs_per_level
         
-        # Curriculum learning loop
-        for difficulty in range(1, num_difficulty_levels + 1):
-            console.print(f"\n[bold blue]Starting difficulty level {difficulty}/{num_difficulty_levels}[/bold blue]")
-            
-            # Create datasets for current difficulty level
-            train_dataset = SchrödingerDataset(
-                seq_len=config.max_seq_len,  # Use config's sequence length
-                num_samples=2000,
-                difficulty_level=difficulty,
-                max_difficulty=num_difficulty_levels
-            )
-            val_dataset = SchrödingerDataset(
-                seq_len=config.max_seq_len,  # Use config's sequence length
-                num_samples=500,
-                difficulty_level=difficulty,
-                max_difficulty=num_difficulty_levels
-            )
-            
-            # Setup trainer for current difficulty
-            trainer.setup(
-                model=model,
-                ops=ops,
-                train_dataset=train_dataset,
-                val_dataset=val_dataset,
-                batch_size=16,
-                seq_len=config.max_seq_len,  # Use config's sequence length
-                lr=lr_manager.current_lr,
-                epochs=epochs_per_level,
-                early_stop=5,
-                weight_decay=1e-4
-            )
-            
-            # Training loop for current difficulty
-            for epoch in range(epochs_per_level):
-                # Start epoch profiling
-                profiler.start_epoch()
+        # Initialize dynamic learning rate manager
+        lr_manager = DynamicLearningRate(
+            initial_lr=5e-4,
+            min_lr=1e-6,
+            max_lr=1e-3,
+            warmup_steps=100,
+            reward_factor=1.1,
+            punishment_factor=0.9,
+            patience=3,
+            min_delta=1e-4
+        )
+        
+        # Initialize trainer plugin with improved settings
+        trainer = SillyAITrainerPlugin(config)
+        
+        # Initialize visualizer plugin and profiler
+        visualizer = SillyAIVisualizerPlugin()
+        visualizer.on_init(model)
+        profiler = ModelProfiler(save_dir="profiles")
+        
+        # Create directories for visualizations
+        os.makedirs("profiles", exist_ok=True)
+        os.makedirs("wavefunctions", exist_ok=True)
+        
+        # Load existing weights if found
+        if os.path.exists('best.pt'):
+            console.print("[green]💾 Found existing model checkpoint[/green]")
+            try:
+                # Load checkpoint
+                checkpoint = torch.load('best.pt')
                 
-                # Train for one epoch
-                train_loss = trainer.train_epoch()
-                
-                # Validate
-                val_loss = trainer.validate()
-                
-                # Update learning rate based on validation loss
-                lr_manager.step(val_loss, trainer.optimizer)
-                
-                # Update progress
-                current_epoch = (difficulty - 1) * epochs_per_level + epoch + 1
-                progress.update(task, advance=1, 
-                              description=f"[cyan]Difficulty {difficulty}/{num_difficulty_levels} - Epoch {epoch+1}/{epochs_per_level}")
-                
-                # Record metrics
-                metrics = {
-                    'train_loss': train_loss,
-                    'val_loss': val_loss,
-                    'learning_rate': lr_manager.current_lr,
-                    'difficulty_level': difficulty
+                # Check if it's a state dict or full checkpoint
+                if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                    state_dict = checkpoint['model_state_dict']
+                else:
+                    state_dict = checkpoint
+                    
+                # Filter out size mismatches
+                model_state_dict = model.state_dict()
+                filtered_state_dict = {
+                    k: v for k, v in state_dict.items() 
+                    if k in model_state_dict and v.shape == model_state_dict[k].shape
                 }
                 
-                # End epoch profiling
-                profiler.end_epoch(current_epoch, metrics)
+                # Load compatible weights
+                model.load_state_dict(filtered_state_dict, strict=False)
                 
-                # Create visualizations every 5 epochs
-                if current_epoch % 5 == 0:
-                    # Create resource usage animation
-                    profiler.create_resource_animation(
-                        f"profiles/resource_usage_epoch_{current_epoch}.gif",
-                        fps=5,
-                        window_size=10
-                    )
+                # Log loaded parameters
+                console.print("\n[cyan]Model State Summary:[/cyan]")
+                for name, param in model.named_parameters():
+                    console.print(f"  {name}: shape={param.shape}, mean={param.mean().item():.4f}, std={param.std().item():.4f}")
                     
-                    # Create static resource usage plot
-                    profiler.plot_resource_usage()
-                    
-                    # Get and display resource summary
-                    summary = profiler.get_resource_summary()
-                    console.print("\n[cyan]Resource Usage Summary:[/cyan]")
-                    for metric, stats in summary.items():
-                        console.print(f"  {metric}:")
-                        for stat, value in stats.items():
-                            console.print(f"    {stat}: {value:.2f}")
-                    
-                    # Get and display reward statistics
-                    reward_stats = lr_manager.get_reward_stats()
-                    console.print("\n[cyan]Learning Progress:[/cyan]")
-                    console.print(f"  Rewards: {reward_stats['rewards']}")
-                    console.print(f"  Punishments: {reward_stats['punishments']}")
-                    console.print(f"  Reward Ratio: {reward_stats['ratio']:.2%}")
-                    
-                    # Print current learning rate and difficulty
-                    console.print(f"\n[cyan]Current learning rate: {lr_manager.current_lr:.2e}[/cyan]")
-                    console.print(f"[cyan]Current difficulty level: {difficulty}/{num_difficulty_levels}[/cyan]")
-    
-    # Print top concepts
-    model.print_concepts(top_k=10)
+                # Log any mismatched parameters
+                missing_keys = set(model_state_dict.keys()) - set(filtered_state_dict.keys())
+                if missing_keys:
+                    console.print("\n[yellow]⚠️ Some parameters were not loaded due to size mismatch:[/yellow]")
+                    for key in missing_keys:
+                        console.print(f"  {key}: expected {model_state_dict[key].shape}, got {state_dict[key].shape if key in state_dict else 'missing'}")
+            except Exception as e:
+                console.print(f"[red]⚠️ Error loading model: {str(e)}[/red]")
+                console.print("[yellow]⚠️ Training from scratch[/yellow]")
+        else:
+            console.print("[yellow]⚠️ No existing model found, training from scratch[/yellow]")
 
-    # Generate and print example bytecode
-    bytecode = model.generate_bytecode()
-    console.print("\n[bold blue]Example bytecode from concept graph:[/bold blue]")
-    for idx, (op, args) in enumerate(bytecode):
-        console.print(f"  {idx:03d}: {op} {args}")
-        
-    # Create final resource usage visualization
-    profiler.create_resource_animation(
-        "profiles/final_resource_usage.gif",
-        fps=5,
-        window_size=20
-    )
-    profiler.plot_resource_usage()
-    
-    # Display final resource summary
-    final_summary = profiler.get_resource_summary()
-    console.print("\n[bold green]Final Resource Usage Summary:[/bold green]")
-    for metric, stats in final_summary.items():
-        console.print(f"  {metric}:")
-        for stat, value in stats.items():
-            console.print(f"    {stat}: {value:.2f}")
+        # Train the model with progress tracking
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeElapsedColumn(),
+        ) as progress:
+            # Create main task
+            task = progress.add_task("[cyan]Training...", total=total_epochs)
             
-    # Display final learning statistics
-    final_reward_stats = lr_manager.get_reward_stats()
-    console.print("\n[bold green]Final Learning Statistics:[/bold green]")
-    console.print(f"  Total Rewards: {final_reward_stats['rewards']}")
-    console.print(f"  Total Punishments: {final_reward_stats['punishments']}")
-    console.print(f"  Final Reward Ratio: {final_reward_stats['ratio']:.2%}")
+            # Curriculum learning loop
+            for difficulty in range(1, num_difficulty_levels + 1):
+                console.print(f"\n[bold blue]Starting difficulty level {difficulty}/{num_difficulty_levels}[/bold blue]")
+                
+                # Create datasets for current difficulty level
+                train_dataset = SchrödingerDataset(
+                    seq_len=config.max_seq_len,  # Use config's sequence length
+                    num_samples=2000,
+                    difficulty_level=difficulty,
+                    max_difficulty=num_difficulty_levels
+                )
+                val_dataset = SchrödingerDataset(
+                    seq_len=config.max_seq_len,  # Use config's sequence length
+                    num_samples=500,
+                    difficulty_level=difficulty,
+                    max_difficulty=num_difficulty_levels
+                )
+                
+                # Setup trainer for current difficulty
+                trainer.setup(
+                    model=model,
+                    ops=ops,
+                    train_dataset=train_dataset,
+                    val_dataset=val_dataset,
+                    batch_size=16,
+                    seq_len=config.max_seq_len,  # Use config's sequence length
+                    lr=lr_manager.current_lr,
+                    epochs=epochs_per_level,
+                    early_stop=5,
+                    weight_decay=1e-4
+                )
+                
+                # Training loop for current difficulty
+                for epoch in range(epochs_per_level):
+                    # Start epoch profiling
+                    profiler.start_epoch()
+                    epoch_start = time.time()
+                    
+                    # Training phase
+                    model.train()
+                    train_loss = await trainer.train_epoch()
+                    
+                    # Validation phase
+                    val_loss = await trainer.validate()
+                    
+                    # Update learning rate based on validation loss
+                    old_lr = trainer.optimizer.param_groups[0]['lr']
+                    trainer.scheduler.step(val_loss)
+                    new_lr = trainer.optimizer.param_groups[0]['lr']
+                    if new_lr != old_lr:
+                        print(f"\n\033[93m📉 Reducing learning rate from {old_lr:.2e} to {new_lr:.2e}\033[0m")
+                    
+                    # Inference test
+                    test_loss = await trainer.run_inference_test()
+                    
+                    # Update progress
+                    current_epoch = (difficulty - 1) * epochs_per_level + epoch + 1
+                    progress.update(task, advance=1, 
+                                  description=f"[cyan]Difficulty {difficulty}/{num_difficulty_levels} - Epoch {epoch+1}/{epochs_per_level}")
+                    
+                    # Record metrics
+                    metrics = {
+                        'train_loss': train_loss,
+                        'val_loss': val_loss,
+                        'test_loss': test_loss,
+                        'learning_rate': new_lr,
+                        'difficulty_level': difficulty
+                    }
+                    
+                    # End epoch profiling
+                    profiler.end_epoch(current_epoch, metrics)
+                    
+                    # Create visualizations every 5 epochs
+                    if current_epoch % 5 == 0:
+                        # Create resource usage animation
+                        profiler.create_resource_animation(
+                            f"profiles/resource_usage_epoch_{current_epoch}.gif",
+                            fps=5,
+                            window_size=10
+                        )
+                        
+                        # Create static resource usage plot
+                        profiler.plot_resource_usage()
+                        
+                        # Get and display resource summary
+                        summary = profiler.get_resource_summary()
+                        console.print("\n[cyan]Resource Usage Summary:[/cyan]")
+                        for metric, stats in summary.items():
+                            console.print(f"  {metric}:")
+                            for stat, value in stats.items():
+                                console.print(f"    {stat}: {value:.2f}")
+                        
+                        # Get and display reward statistics
+                        reward_stats = lr_manager.get_reward_stats()
+                        console.print("\n[cyan]Learning Progress:[/cyan]")
+                        console.print(f"  Rewards: {reward_stats['rewards']}")
+                        console.print(f"  Punishments: {reward_stats['punishments']}")
+                        console.print(f"  Reward Ratio: {reward_stats['ratio']:.2%}")
+                        
+                        # Print current learning rate and difficulty
+                        console.print(f"\n[cyan]Current learning rate: {new_lr:.2e}[/cyan]")
+                        console.print(f"[cyan]Current difficulty level: {difficulty}/{num_difficulty_levels}[/cyan]")
+            
+        # Print top concepts
+        model.print_concepts(top_k=10)
+
+        # Generate and print example bytecode
+        bytecode = model.generate_bytecode()
+        console.print("\n[bold blue]Example bytecode from concept graph:[/bold blue]")
+        for idx, (op, args) in enumerate(bytecode):
+            console.print(f"  {idx:03d}: {op} {args}")
+            
+        # Create final resource usage visualization
+        profiler.create_resource_animation(
+            "profiles/final_resource_usage.gif",
+            fps=5,
+            window_size=20
+        )
+        profiler.plot_resource_usage()
+        
+        # Display final resource summary
+        final_summary = profiler.get_resource_summary()
+        console.print("\n[bold green]Final Resource Usage Summary:[/bold green]")
+        for metric, stats in final_summary.items():
+            console.print(f"  {metric}:")
+            for stat, value in stats.items():
+                console.print(f"    {stat}: {value:.2f}")
+                
+        # Display final learning statistics
+        final_reward_stats = lr_manager.get_reward_stats()
+        console.print("\n[bold green]Final Learning Statistics:[/bold green]")
+        console.print(f"  Total Rewards: {final_reward_stats['rewards']}")
+        console.print(f"  Total Punishments: {final_reward_stats['punishments']}")
+        console.print(f"  Final Reward Ratio: {final_reward_stats['ratio']:.2%}")
+        
+    finally:
+        await ops.cache.stop()  # Stop the cache worker
 
 if __name__ == "__main__":
-    main()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()

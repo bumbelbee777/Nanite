@@ -284,11 +284,25 @@ class ModelProfiler:
         except:
             self.metrics['gpu_memory'].append(0)
             
+    def _serialize_metrics(self):
+        """Convert metrics to JSON-serializable format."""
+        serialized = {}
+        for key, values in self.metrics.items():
+            # Convert any coroutines to their results
+            if isinstance(values, list):
+                serialized[key] = [
+                    v.result() if hasattr(v, 'result') else v 
+                    for v in values
+                ]
+            else:
+                serialized[key] = values
+        return serialized
+        
     def _save_metrics(self, epoch: int):
-        """Save metrics to file."""
+        """Save metrics to JSON file."""
         metrics_file = self.save_dir / f'metrics_epoch_{epoch}.json'
         with open(metrics_file, 'w') as f:
-            json.dump(self.metrics, f, indent=2)
+            json.dump(self._serialize_metrics(), f, indent=2)
             
     def plot_metrics(self, save_path: str):
         """Plot training metrics."""
@@ -367,6 +381,11 @@ class ModelProfiler:
             # Calculate window indices
             start_idx = max(0, frame - window_size)
             end_idx = frame + 1
+            
+            # Ensure we have data to plot
+            if start_idx >= end_idx or end_idx > len(self.metrics['gpu_memory']):
+                return
+                
             x = range(start_idx, end_idx)
             
             # Plot memory usage
@@ -409,8 +428,12 @@ class ModelProfiler:
                            interval=1000//fps, blit=False)
         
         # Save animation
-        anim.save(save_path, writer='pillow', fps=fps)
-        plt.close()
+        try:
+            anim.save(save_path, writer='pillow', fps=fps)
+        except Exception as e:
+            logger.error(f"Failed to save animation: {str(e)}")
+        finally:
+            plt.close()
         
     def plot_resource_usage(self, save: bool = True):
         """Plot resource usage over time."""

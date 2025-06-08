@@ -10,6 +10,7 @@ import numpy as np
 import os
 import time
 from datetime import timedelta
+import asyncio
 
 class SillyAITrainerPlugin(SillyPlugin):
     """
@@ -33,6 +34,7 @@ class SillyAITrainerPlugin(SillyPlugin):
         self.visualizer = None
         self.ψ_history = []  # Store wavefunction history for animation
         self.weight_decay = 0.0  # Initialize weight decay parameter
+        self.loop = asyncio.get_event_loop()  # Get event loop for async operations
 
     def setup(self, model, ops, train_dataset=None, val_dataset=None, batch_size=32, 
              seq_len=64, lr=1e-3, epochs=10, early_stop=5, weight_decay=0.0):
@@ -90,7 +92,11 @@ class SillyAITrainerPlugin(SillyPlugin):
         if val_dataset:
             print(f"  Validation samples: {len(val_dataset)}")
             
-    def train_epoch(self):
+    async def _forward_pass(self, V: torch.Tensor) -> torch.Tensor:
+        """Helper method to handle async forward pass."""
+        return await self.model.transformer(V, generate_response=False)
+
+    async def train_epoch(self):
         """Train for one epoch."""
         self.model.train()
         total_loss = 0
@@ -103,7 +109,7 @@ class SillyAITrainerPlugin(SillyPlugin):
             
             # Forward pass
             self.optimizer.zero_grad()
-            psi_pred = self.model(V)
+            psi_pred = await self._forward_pass(V)
             
             # Calculate loss using complex loss
             loss = self.criterion(psi_pred, psi)
@@ -123,7 +129,7 @@ class SillyAITrainerPlugin(SillyPlugin):
         print()  # New line after progress
         return total_loss / num_batches if num_batches > 0 else 0
         
-    def validate(self):
+    async def validate(self):
         """Validate the model."""
         self.model.eval()
         total_loss = 0
@@ -136,7 +142,7 @@ class SillyAITrainerPlugin(SillyPlugin):
                 psi = psi.to(self.model.device)
                 
                 # Forward pass
-                psi_pred = self.model(V)
+                psi_pred = await self._forward_pass(V)
                 
                 # Calculate loss using complex loss
                 loss = self.criterion(psi_pred, psi)
@@ -148,6 +154,7 @@ class SillyAITrainerPlugin(SillyPlugin):
         return total_loss / num_batches if num_batches > 0 else 0
 
     def train(self, epochs=None):
+        """Synchronous wrapper for async training."""
         if epochs is not None:
             self.epochs = epochs
         best_val = float('inf')
@@ -162,30 +169,10 @@ class SillyAITrainerPlugin(SillyPlugin):
             
             # Training phase
             self.model.train()
-            train_loss = 0
-            num_batches = len(self.train_loader)
-            for batch_idx, (V, ψ) in enumerate(self.train_loader, 1):
-                self.profiler.start_batch()
-                self.optimizer.zero_grad()
-                ψ_pred = self.model(V.to(self.device))
-                if not ψ.is_complex():
-                    ψ = torch.complex(ψ, torch.zeros_like(ψ))
-                loss = self.criterion(ψ_pred, ψ.to(self.device))
-                loss.backward()
-                self.optimizer.step()
-                train_loss += loss.item() * V.size(0)
-                self.profiler.end_batch()
-                
-                if self.verbose:
-                    print(f"\r\033[94m  🏃 Training batch {batch_idx}/{num_batches} "
-                          f"[{'█' * int(20 * batch_idx / num_batches):20}]",
-                          end='', flush=True)
-            
-            train_loss /= len(self.train_loader.dataset)
-            print()  # Newline after batch progress
+            train_loss = self.loop.run_until_complete(self.train_epoch())
             
             # Validation phase
-            val_loss = self.validate()
+            val_loss = self.loop.run_until_complete(self.validate())
             
             # Update learning rate based on validation loss
             old_lr = self.optimizer.param_groups[0]['lr']
@@ -195,7 +182,7 @@ class SillyAITrainerPlugin(SillyPlugin):
                 print(f"\n\033[93m📉 Reducing learning rate from {old_lr:.2e} to {new_lr:.2e}\033[0m")
             
             # Inference test
-            test_loss = self.run_inference_test()
+            test_loss = self.loop.run_until_complete(self.run_inference_test())
             
             # Update profiler with metrics
             metrics = {
@@ -252,7 +239,7 @@ class SillyAITrainerPlugin(SillyPlugin):
             "visualizations/wavefunction_evolution.gif"
         )
 
-    def run_inference_test(self):
+    async def run_inference_test(self):
         """Run inference test on a small batch of data."""
         self.model.eval()
         with torch.no_grad():
@@ -265,7 +252,7 @@ class SillyAITrainerPlugin(SillyPlugin):
             # Run inference
             V = V.to(self.device)
             ψ = ψ.to(self.device)
-            ψ_pred = self.model(V)
+            ψ_pred = await self._forward_pass(V)
             
             # Store prediction for animation
             self.ψ_history.append(ψ_pred[0])

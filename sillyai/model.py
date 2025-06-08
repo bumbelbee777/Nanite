@@ -159,3 +159,95 @@ class SillyAI(nn.Module):
     def concept_graph(self, value):
         """Set the concept graph in the transformer."""
         self.transformer.concept_graph = value 
+
+    async def generate_response(
+        self,
+        input_tensor: torch.Tensor,
+        num_tokens: int = 10,
+        temperature: float = 0.7,
+        top_k: int = 50,
+        top_p: float = 0.9
+    ) -> torch.Tensor:
+        """Generate a response using the multi-token prediction system.
+        
+        Args:
+            input_tensor: Input tensor [batch_size, seq_len, input_dim]
+            num_tokens: Number of tokens to generate
+            temperature: Sampling temperature
+            top_k: Number of top tokens to consider
+            top_p: Nucleus sampling probability
+            
+        Returns:
+            Generated response tensor [batch_size, num_tokens, output_dim]
+        """
+        # Move input to device
+        input_tensor = input_tensor.to(self.device)
+        
+        # Set temperature for TGUs
+        for tgu in self.transformer.response_generator.tgus:
+            tgu.temperature = temperature
+            
+        # Generate response
+        with torch.no_grad():
+            output = await self.transformer(
+                input_tensor,
+                generate_response=True,
+                num_tokens=num_tokens
+            )
+            
+        # Log generation metrics
+        self.logger.info(f"Generated response with {num_tokens} tokens")
+        self.logger.info(f"Temperature: {temperature}, Top-k: {top_k}, Top-p: {top_p}")
+        
+        return output
+        
+    async def generate_with_retry(
+        self,
+        input_tensor: torch.Tensor,
+        num_tokens: int = 10,
+        max_retries: int = 3,
+        min_score: float = 15.0
+    ) -> torch.Tensor:
+        """Generate response with retries if quality is insufficient.
+        
+        Args:
+            input_tensor: Input tensor [batch_size, seq_len, input_dim]
+            num_tokens: Number of tokens to generate
+            max_retries: Maximum number of generation retries
+            min_score: Minimum acceptable score
+            
+        Returns:
+            Generated response tensor [batch_size, num_tokens, output_dim]
+        """
+        best_response = None
+        best_score = -float('inf')
+        
+        for attempt in range(max_retries):
+            # Generate response
+            response = await self.generate_response(
+                input_tensor,
+                num_tokens=num_tokens
+            )
+            
+            # Score the response
+            candidates = await self.transformer.response_generator.generate_candidates(
+                response, num_tokens=1  # Just score the response
+            )
+            
+            if candidates:
+                score = candidates[0].score
+                if score > best_score:
+                    best_score = score
+                    best_response = response
+                    
+                if score >= min_score:
+                    self.logger.info(f"Generated acceptable response on attempt {attempt + 1}")
+                    return response
+                    
+            self.logger.warning(f"Attempt {attempt + 1} failed with score {score:.2f}")
+            
+        if best_response is not None:
+            self.logger.warning(f"Using best response with score {best_score:.2f}")
+            return best_response
+            
+        raise RuntimeError("Failed to generate acceptable response after all retries") 

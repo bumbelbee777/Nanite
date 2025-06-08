@@ -1,16 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import fft
-from typing import Optional, List, Dict, Union, Tuple
+from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import weakref
 import math
 
 from .ops import *
 from .config import ModelConfig
+from .tgu import ResponseGenerator
 
 def complex_checkpoint(function, *args):
     """Checkpointing wrapper that handles complex tensors"""
@@ -336,40 +335,62 @@ class ComplexInputProjection(nn.Module):
         return self.act(x)
     
 class PositionalEncoding(nn.Module):
+    """Positional encoding using geometric frequencies."""
     def __init__(self, config: ModelConfig):
         super().__init__()
-        self.config = config
         self.d_model = config.d_model
-        self.max_len = config.max_seq_len
+        self.max_seq_len = config.max_seq_len
         
-        # Create geometric progression of frequencies for embeddings
-        freqs = 1.0 / (10000 ** (torch.arange(0, self.d_model, dtype=torch.float32) / self.d_model))
-        self.register_buffer('freqs', freqs)
-        print(f"[PositionalEncoding] I got initialized successfully with geometric frequencies: min={freqs.min().item():.5f}, max={freqs.max().item():.5f}! :D")
-
+        # Initialize geometric frequencies
+        min_freq = 1.0 / self.max_seq_len
+        max_freq = 1.0
+        self.frequencies = nn.Parameter(
+            torch.logspace(
+                math.log10(min_freq),
+                math.log10(max_freq),
+                self.d_model // 2
+            )
+        )
+        
+        # Initialize phases
+        self.phases = nn.Parameter(torch.zeros(self.d_model // 2))
+        
+        print(f"[PositionalEncoding] I got initialized successfully with geometric frequencies: min={min_freq:.5f}, max={max_freq:.5f}! :D")
+        
     def forward(self, x: torch.Tensor, ops: Optional[MultivectorOps] = None) -> torch.Tensor:
-        """
+        """Apply positional encoding to input tensor.
+        
         Args:
-            x: Complex tensor of shape [batch_size, seq_len, embed_dim]
-            ops: Optional MultivectorOps instance
-        Returns:
-            Complex tensor of same shape with positional information
-        """
-        if ops is None:
-            ops = MultivectorOps()
+            x: Input tensor of shape [batch_size, seq_len, d_model]
+            ops: Optional operations module
             
-        batch_size, seq_len, embed_dim = x.shape
-        positions = torch.arange(0, seq_len, device=x.device, dtype=torch.float32)
-        angles = positions.unsqueeze(1) * self.freqs.unsqueeze(0)
-
-        # Create complex phase tensor directly
-        encoding = torch.exp(1j * angles)  # [seq_len, embed_dim]
+        Returns:
+            Encoded tensor of shape [batch_size, seq_len, d_model]
+        """
+        batch_size, seq_len, d_model = x.shape
         
-        # Expand for batch dimension and add to input
-        encoding = encoding.unsqueeze(0).expand(batch_size, -1, -1)
+        # Generate position indices
+        positions = torch.arange(seq_len, device=x.device).float()
         
-        # Add positional encoding using ops for complex addition
-        return ops.matmul_sync(x, encoding)
+        # Expand frequencies and phases for broadcasting
+        freqs = self.frequencies.unsqueeze(0)  # [1, d_model//2]
+        phases = self.phases.unsqueeze(0)      # [1, d_model//2]
+        
+        # Compute complex exponential
+        pos_enc = torch.exp(1j * (freqs * positions.unsqueeze(-1) + phases))  # [seq_len, d_model//2]
+        
+        # Split into real and imaginary parts
+        pos_enc_real = pos_enc.real  # [seq_len, d_model//2]
+        pos_enc_imag = pos_enc.imag  # [seq_len, d_model//2]
+        
+        # Concatenate real and imaginary parts
+        pos_enc = torch.cat([pos_enc_real, pos_enc_imag], dim=-1)  # [seq_len, d_model]
+        
+        # Add batch dimension
+        pos_enc = pos_enc.unsqueeze(0)  # [1, seq_len, d_model]
+        
+        # Add positional encoding to input
+        return x + pos_enc
 
 class ComplexPReLU(nn.Module):
     def __init__(self, config_or_dim):
@@ -541,67 +562,98 @@ class TransformerLayer(nn.Module):
         super().__init__()
         self.config = config
         self.ops = ops
-        embed_dim = config.d_model
-        num_heads = config.n_heads
-        mlp_dim = config.mlp_dim
-        self.attn_norm = LayerNorm(embed_dim)
-        self.mlp_norm = LayerNorm(embed_dim)
-        self.attn = InfiniToeplitz(config, ops)
+        
+        # Initialize components
+        self.attention = InfiniToeplitz(config, ops)
+        self.norm1 = LayerNorm(config.d_model)
+        self.norm2 = LayerNorm(config.d_model)
         self.mlp = ComplexMLP(config, ops)
-        self.alpha = nn.Parameter(torch.ones(1, dtype=torch.float32) * 0.02)
-        self.drop = ComplexDropout(config.dropout)
-        # Store concept_graph directly since it's already a weak reference
-        self.concept_graph = concept_graph
+        self.dropout = ComplexDropout(config.dropout)
+        self.activation = DynamicActivation(config.d_model)
+        
         print("[TransformerLayer] I got initialized successfully! :D")
-
+        
     def forward(self, x: torch.Tensor, ops: Optional[MultivectorOps] = None) -> torch.Tensor:
-        if ops is None:
-            ops = self.ops
-        attn_out = self.attn(self.attn_norm(x), ops)
-        x = x + self.drop(attn_out * self.alpha)
-        mlp_out = self.mlp(self.mlp_norm(x), ops)
-        return x + self.drop(mlp_out * self.alpha)
+        """Forward pass through transformer layer.
+        
+        Args:
+            x: Input tensor of shape [batch_size, seq_len, d_model]
+            ops: Optional operations module
+            
+        Returns:
+            Output tensor of same shape
+        """
+        # Self-attention
+        attn_output = self.attention(x, ops)
+        x = self.norm1(x + self.dropout(attn_output))
+        
+        # Feed-forward
+        ff_output = self.mlp(x, ops)
+        x = self.norm2(x + self.dropout(ff_output))
+        
+        # Apply dynamic activation
+        x = self.activation(x)
+        
+        return x
 
 class Transformer(nn.Module):
     def __init__(self, config: ModelConfig, ops: Optional[MultivectorOps] = None, concept_graph=None):
         super().__init__()
         self.config = config
         self.ops = ops or MultivectorOps()
-        self.concept_graph = concept_graph
         
-        # Input embedding and positional encoding
-        self.embedding = ComplexLinear(config.input_dim, config.d_model)
+        # Initialize components
+        self.input_proj = ComplexInputProjection(config, self.ops)
         self.pos_encoding = PositionalEncoding(config)
+        self.dropout = ComplexDropout(config.dropout)
         
-        # Transformer blocks
-        self.blocks = nn.ModuleList([
+        # Create transformer layers
+        self.layers = nn.ModuleList([
             TransformerLayer(config, self.ops, concept_graph)
             for _ in range(config.n_layers)
         ])
-        
-        # Output projection
-        self.output = ComplexLinear(config.d_model, config.output_dim)
         
         # Initialize weights
         self.apply(self._init_weights)
         
     def _init_weights(self, module):
-        if isinstance(module, ComplexLinear):
+        if isinstance(module, nn.Linear):
             nn.init.xavier_uniform_(module.weight)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
                 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # Input embedding
-        x = self.embedding(x)
-        x = self.pos_encoding(x, self.ops)
+    async def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        generate_response: bool = False,
+        num_tokens: int = 10
+    ) -> torch.Tensor:
+        """Forward pass through transformer.
         
-        # Process through layers
-        for block in self.blocks:
-            x = block(x, self.ops)
+        Args:
+            x: Input tensor of shape [batch_size, seq_len, input_dim]
+            mask: Optional attention mask
+            generate_response: Whether to generate response
+            num_tokens: Number of tokens to generate if generating response
             
-        # Output projection
-        return self.output(x)
+        Returns:
+            Output tensor of shape [batch_size, seq_len, output_dim]
+        """
+        # Project input
+        x = self.input_proj(x, self.ops)
+        
+        # Add positional encoding
+        x = self.pos_encoding(x)
+        
+        # Apply dropout
+        x = self.dropout(x)
+        
+        # Process through transformer layers
+        for layer in self.layers:
+            x = layer(x, self.ops)
+            
+        return x
 
 class FeedForward(nn.Module):
     def __init__(self, d_model: int, d_ff: int):

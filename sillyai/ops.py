@@ -82,17 +82,43 @@ class TensorCache:
         self.ac = defaultdict(int)
         self.lock = asyncio.Lock()
         self.prefetch = asyncio.Queue()
-        asyncio.get_event_loop().create_task(self._worker())
+        self.worker_task = None
         self.mpr = MixedPrecisionRouter()
         self.quant = None
         self.dt, self.tol = decomp_thresh, tol
         print("[TensorCache] I got initialized successfully! :D")
+        
+    async def start(self):
+        """Start the worker task."""
+        if self.worker_task is None:
+            self.worker_task = asyncio.create_task(self._worker())
+            
+    async def stop(self):
+        """Stop the worker task."""
+        if self.worker_task is not None:
+            self.worker_task.cancel()
+            try:
+                await self.worker_task
+            except asyncio.CancelledError:
+                pass
+            self.worker_task = None
 
     async def _worker(self):
-        while 1:
-            k, t = await self.prefetch.get()
-            await self._put(k, self._compress(t))
-            self.prefetch.task_done()
+        """Worker task for processing prefetch queue."""
+        try:
+            while True:
+                k, t = await self.prefetch.get()
+                await self._put(k, self._compress(t))
+                self.prefetch.task_done()
+        except asyncio.CancelledError:
+            # Clean up any remaining items in the queue
+            while not self.prefetch.empty():
+                try:
+                    self.prefetch.get_nowait()
+                    self.prefetch.task_done()
+                except asyncio.QueueEmpty:
+                    break
+            raise
 
     def _key(self, tag, *a):
         h = hashlib.sha256()
