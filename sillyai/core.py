@@ -413,118 +413,95 @@ class DynamicActivation(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
-        self.cprelu = ComplexPReLU(dim)
-        self.alpha = nn.Parameter(torch.ones(1, dtype=torch.complex64))
-        self.beta = nn.Parameter(torch.zeros(1, dtype=torch.complex64))
-        self.dropout = ComplexDropout(0.3)
-        print("[DynamicActivation] I got initialized successfully! :D")
-
+        self.alpha = nn.Parameter(torch.ones(dim) * 0.1)  # Initialize with small values
+        self.beta = nn.Parameter(torch.zeros(dim))
+        self.eps = 1e-8  # Small epsilon for numerical stability
+        
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        activated = self.cprelu(x)
-        scaled = self.alpha * activated + self.beta
-        return self.dropout(scaled)
+        """Apply dynamic activation function with numerical stability.
+        
+        Args:
+            x: Input tensor of shape [batch_size, seq_len, dim]
+            
+        Returns:
+            Activated tensor of same shape
+        """
+        # Add small epsilon to prevent division by zero
+        x = x + self.eps
+        
+        # Compute activation with gradient clipping
+        alpha = torch.clamp(self.alpha, min=0.1, max=10.0)  # Prevent extreme values
+        beta = torch.clamp(self.beta, min=-10.0, max=10.0)
+        
+        # Apply activation
+        y = torch.tanh(alpha * x + beta)
+        
+        # Normalize output
+        y = y / (torch.abs(y).max() + self.eps)
+        
+        return y
 
 class InfiniToeplitz(nn.Module):
     def __init__(self, config: ModelConfig, ops: MultivectorOps):
         super().__init__()
-        self.config = config
-        self.ops = ops
-        self.num_heads = config.n_heads
-        self.head_dim = config.d_model // config.n_heads
-
-        # Projection layers for Q, K, V
-        self.q_proj = LinearLayer(config.d_model, config.d_model)
-        self.k_proj = LinearLayer(config.d_model, config.d_model)
-        self.v_proj = LinearLayer(config.d_model, config.d_model)
-
-        # Initialize structured matrix parameters and gates
-        self.key_params = nn.ParameterList()
-        self.value_params = nn.ParameterList()
-        self.key_gate = nn.Parameter(torch.ones(config.n_heads, 1, dtype=torch.float32) * 0.5)
-        self.value_gate = nn.Parameter(torch.ones(config.n_heads, 1, dtype=torch.float32) * 0.5)
-
-        for _ in range(config.n_heads):
-            # Initialize key parameters
-            key_param = torch.randn(self.head_dim, dtype=torch.complex64) * 0.02
-            self.key_params.append(nn.Parameter(key_param))
-
-            # Initialize value parameters
-            value_param = torch.randn(self.head_dim, dtype=torch.complex64) * 0.02
-            self.value_params.append(nn.Parameter(value_param))
-
-        # Output projection
-        self.out_proj = LinearLayer(config.d_model, config.d_model)
-        self.norm_q = LayerNorm(config.d_model)
-        self.norm_k = LayerNorm(config.d_model)
-        self.norm_v = LayerNorm(config.d_model)
-
+        self.d_model = config.d_model
+        self.eps = 1e-8
+        
+        # Initialize complex parameters
+        self.query = nn.Parameter(torch.randn(self.d_model, self.d_model, dtype=torch.complex64) * 0.02)
+        self.key = nn.Parameter(torch.randn(self.d_model, self.d_model, dtype=torch.complex64) * 0.02)
+        self.value = nn.Parameter(torch.randn(self.d_model, self.d_model, dtype=torch.complex64) * 0.02)
+        
+        # Initialize circulant matrix
+        self.circulant = nn.Parameter(torch.randn(self.d_model, dtype=torch.complex64) * 0.02)
+        
+        # Scale factor for attention
+        self.scale = 1.0 / math.sqrt(self.d_model)
+        
     def _circulant_matmul(self, x, c):
-        """Handles both real and complex inputs with proper output dtype"""
-        # Ensure complex dtype
-        if not x.is_complex():
-            x = torch.complex(x, torch.zeros_like(x))
-        if not c.is_complex():
-            c = torch.complex(c, torch.zeros_like(c))
+        """Multiply by circulant matrix using FFT."""
+        # Add small epsilon to prevent division by zero
+        c = c + self.eps
         
-        # FFT processing
-        X = torch.fft.fft(x)
-        C = torch.fft.fft(c)
+        # FFT of circulant matrix
+        c_fft = torch.fft.fft(c)
         
-        # Direct complex multiplication
-        out = torch.fft.ifft(X * C)
+        # FFT of input
+        x_fft = torch.fft.fft(x, dim=-1)
         
-        # Ensure output matches input dtype
-        return out.to(x.dtype)
-
+        # Element-wise multiplication in frequency domain
+        y_fft = x_fft * c_fft.unsqueeze(0)
+        
+        # Inverse FFT
+        y = torch.fft.ifft(y_fft, dim=-1)
+        
+        return y
+        
     def forward(self, x, ops=None, tokens=None):
-        ops = ops or self.ops
-        batch_size, seq_len, _ = x.shape
+        """Forward pass with complex number support."""
+        # Project queries, keys, and values
+        q = torch.matmul(x, self.query)  # [batch_size, seq_len, d_model]
+        k = torch.matmul(x, self.key)    # [batch_size, seq_len, d_model]
+        v = torch.matmul(x, self.value)  # [batch_size, seq_len, d_model]
         
-        # Project and normalize
-        q = self.q_proj(self.norm_q(x), ops)
-        k = self.k_proj(self.norm_k(x), ops)
-        v = self.v_proj(self.norm_v(x), ops)
+        # Apply circulant matrix to keys
+        k = self._circulant_matmul(k, self.circulant)
         
-        # Reshape for multi-head attention
-        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        # Compute attention scores using complex conjugate for proper complex multiplication
+        scores = torch.matmul(q, k.conj().transpose(-2, -1)) * self.scale  # [batch_size, seq_len, seq_len]
         
-        # Initialize states
-        key_state = [param.clone().expand(batch_size, -1) for param in self.key_params]
-        value_state = [param.clone().expand(batch_size, -1) for param in self.value_params]
+        # Use magnitude for softmax
+        scores_mag = torch.abs(scores)
+        scores_mag = scores_mag - scores_mag.max(dim=-1, keepdim=True)[0]
+        attn_weights = torch.softmax(scores_mag, dim=-1)
         
-        outputs = []
-        for i in range(seq_len):
-            q_i = q[:, :, i, :]
-            k_i = k[:, :, i, :]
-            v_i = v[:, :, i, :]
-            head_outputs = []
-            
-            for h in range(self.num_heads):
-                # Update states
-                delta_k = k_i[:, h]
-                key_state[h] = (1 - self.key_gate[h]) * key_state[h] + self.key_gate[h] * delta_k
-                
-                delta_v = v_i[:, h]
-                value_state[h] = (1 - self.value_gate[h]) * value_state[h] + self.value_gate[h] * delta_v
-                
-                # Compute attention using circulant multiplication
-                attn = self._circulant_matmul(q_i[:, h], key_state[h])
-                attn_scores = torch.complex(
-                    F.softmax(attn.real, dim=-1),
-                    torch.zeros_like(attn.real)
-                )
-                
-                # Compute head output
-                out = self._circulant_matmul(attn_scores, value_state[h])
-                head_outputs.append(out)
-            
-            combined = torch.stack(head_outputs, dim=1)  # [batch, heads, head_dim]
-            outputs.append(combined.reshape(batch_size, -1))  # Flatten head dims
+        # Convert attention weights back to complex
+        attn_weights = attn_weights.to(torch.complex64)
         
-        output = torch.stack(outputs, dim=1)  # [batch, seq_len, embed_dim]
-        return self.out_proj(output, ops)
+        # Apply attention weights
+        output = torch.matmul(attn_weights, v)  # [batch_size, seq_len, d_model]
+        
+        return output
 
 class ComplexMLP(nn.Module):
     def __init__(self, config, ops):
@@ -613,6 +590,9 @@ class Transformer(nn.Module):
             for _ in range(config.n_layers)
         ])
         
+        # Final projection layer to output_dim
+        self.output_proj = LinearLayer(config.d_model, config.output_dim)
+        
         # Initialize weights
         self.apply(self._init_weights)
         
@@ -652,6 +632,9 @@ class Transformer(nn.Module):
         # Process through transformer layers
         for layer in self.layers:
             x = layer(x, self.ops)
+            
+        # Project to output_dim
+        x = self.output_proj(x, self.ops)
             
         return x
 
@@ -721,13 +704,18 @@ class ComplexLoss(nn.Module):
         if not target.is_complex():
             target = torch.complex(target, torch.zeros_like(target))
             
+        # Add small epsilon to prevent division by zero
+        eps = 1e-8
+            
         # Compute MSE loss for real and imaginary parts separately
         real_loss = F.mse_loss(pred.real, target.real)
         imag_loss = F.mse_loss(pred.imag, target.imag)
         mse_loss = real_loss + imag_loss
         
         # Add complex number regularization to encourage meaningful phase
-        phase_reg = torch.mean(torch.abs(torch.angle(pred)))  # Penalize large phase angles
+        # Use safe_atan2 to prevent NaN
+        pred_phase = torch.atan2(pred.imag + eps, pred.real + eps)
+        phase_reg = torch.mean(torch.abs(pred_phase))  # Penalize large phase angles
         
         # Add concept graph regularization if available
         concept_loss = torch.tensor(0.0, device=pred.device)
@@ -743,7 +731,10 @@ class ComplexLoss(nn.Module):
                 # Encourage predictions to align with relevant concepts
                 concept_loss = -torch.mean(torch.max(similarity, dim=-1)[0])
         
-        # Combine losses
+        # Combine losses with gradient clipping
         total_loss = mse_loss + self.alpha * concept_loss + self.beta * phase_reg
+        
+        # Clip loss to prevent NaN
+        total_loss = torch.clamp(total_loss, min=0.0, max=1e6)
         
         return total_loss

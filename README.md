@@ -6,9 +6,11 @@
 
 </div>
 
+**⚠️WARNING⚠️** The model is mostly untested outside of simple cases. Expect bugs and other unintended behavior! Contributions are more than welcome!
+
 ## 🌟 Overview
 
-SillyAI is a groundbreaking transformer model that combines quantum computing principles with modern deep learning techniques. Its unique neuro-symbolic complex-valued architecture sets it apart from other models, making it particularly powerful for fields such as reasoning, physics simulations, and quantum system analysis.
+SillyAI is a complex-valued neuro-symbolic transformer model that combines systems design principles with modern deep learning techniques and reasoning engines. Its unique architecture sets it apart from other models, making it particularly powerful for fields such as reasoning, physics simulations, and quantum system analysis.
 
 <div align="center">
   <img src="media/wavefunction_evolution.gif" alt="Wavefunction Evolution" width="600"/>
@@ -16,7 +18,13 @@ SillyAI is a groundbreaking transformer model that combines quantum computing pr
   <em>Real-time visualization of wavefunction evolution during training</em>
 </div>
 
-## 🚀 Revolutionary Architecture
+<div align="center">
+    <img src="media/resource_usage.png" alt="Resource Usage When Training" width="600"/>
+    <br>
+    <em>Resource usage while training</em>
+</div>
+
+## 🚀 Unconventional Architecture
 
 ### 🧮 InfiniToeplitz Attention
 - Infinite context window through structured matrix compression
@@ -42,7 +50,7 @@ SillyAI is a groundbreaking transformer model that combines quantum computing pr
 - JIT compilation of critical paths
 
 ### 🎯 Advanced Features
-- Complex-valued PReLU with phase preservation
+- Complex-valued parametric ReLU with phase preservation
 - Multi-token async prediction
 - Response synthesis through candidate scoring
 - Task complexity-based routing

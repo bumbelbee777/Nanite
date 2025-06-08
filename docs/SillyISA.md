@@ -147,30 +147,33 @@ In addition to this, variables are also supported as aliases to registers. This 
 
 ```
 .Proof() {
-    %a: r0<int> = 3           // r0 = a = 3
-    %b: r1<int> = 4           // r1 = b = 4
-    %c: r2<int> = 5           // r2 = c = 5
-
-    r4 = POW r0, 2            // r4 = a^2 = 9
-    r5 = POW r1, 2            // r5 = b^2 = 16
-
-    r3 = ADD r4, r5           // r3 = a^2 + b^2 = 25
-
-    r6 = POW r2, 2            // r6 = c^2 = 25
-
-    r7 = r3 - r6              // r7 = a^2 + b^2 - c^2 = 0
-
-    CJM r7 != 0, Fail()       // Jump to Fail() if r7 is not 0 (proof fails)
-
-    ASSERT true               // Proof holds, assert true
-    HLT                       // Halt program
+    // Declare variables with initialization
+    %a: r0<int> = 3           // First triangle side
+    %b: r1<int> = 4           // Second triangle side
+    %c: r2<int> = 5           // Hypotenuse
+    
+    // Declare temporary variables for calculations
+    %a_squared: r4<int>
+    %b_squared: r5<int>
+    %sum: r3<int>
+    %c_squared: r6<int>
+    %difference: r7<int>
+    %zero: r8<int> = 0        // For comparison
+    %result: r9<bool>         // For assertion result
+    
+    // Calculate a² + b² = c²
+    POW a, 2, a_squared       // a² = 9
+    POW b, 2, b_squared      // b² = 16
+    ADD a_squared, b_squared, sum     // sum = a² + b² = 25
+    POW c, 2, c_squared      // c² = 25
+    SUB sum, c_squared, difference   // difference = sum - c² = 0
+    
+    // Compare difference with zero using IFF (if and only if)
+    IFF difference, zero, result  // True if difference == 0
+    ASSERT result                 // Assert the equality
+    HLT
 }
 
-.Fail() {
-    ASSERT false              // Proof failed, assert false
-    HLT                       // Halt program
-}
-
-// Call the Proof() routine to execute it
+// Run the proof
 Proof()
 ```

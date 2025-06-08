@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class WavefunctionVisualizer:
     """Visualizes quantum wavefunctions and their evolution during training."""
     
-    def __init__(self, save_dir: str = "wavefunctions"):
+    def __init__(self, save_dir: str = "profiles"):
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True)
         
@@ -33,12 +33,12 @@ class WavefunctionVisualizer:
         
         # Initialize plot settings
         self.fig_size = (12, 8)
-        self.dpi = 100
+        self.dpi = 150  # Increased DPI for better quality
         self.colors = {
-            'potential': 'k',
-            'wavefunction': 'b',
-            'prediction': 'r',
-            'probability': 'g'
+            'potential': '#1f77b4',  # Blue
+            'wavefunction': '#2ca02c',  # Green
+            'prediction': '#ff7f0e',  # Orange
+            'probability': '#d62728'  # Red
         }
         
     def plot_wavefunction(self, x: torch.Tensor, V: torch.Tensor, ψ: torch.Tensor, 
@@ -49,111 +49,180 @@ class WavefunctionVisualizer:
         self.history['potentials'].append(V.detach().cpu().numpy())
         self.history['predictions'].append(ψ_pred.detach().cpu().numpy())
         
-        # Create figure
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=self.fig_size)
+        # Create figure with 2 subplots
+        if torch.is_complex(ψ):
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), dpi=150)
+        else:
+            fig, ax1 = plt.subplots(1, 1, figsize=(12, 6), dpi=150) # Only one subplot for real magnitude
         
-        # Plot potential
-        ax1.plot(x.cpu().numpy(), V.cpu().numpy(), 
-                color=self.colors['potential'], label='Potential')
-        ax1.set_xlabel('x')
-        ax1.set_ylabel('V(x)')
-        ax1.set_title(f'Potential Energy (Epoch {epoch})')
-        ax1.legend()
-        ax1.grid(True)
+        # Convert tensors to numpy arrays
+        x_np = x.cpu().numpy()
         
-        # Plot wavefunction
-        ax2.plot(x.cpu().numpy(), ψ.cpu().numpy(), 
-                color=self.colors['wavefunction'], label='True')
-        ax2.plot(x.cpu().numpy(), ψ_pred.cpu().numpy(), 
-                color=self.colors['prediction'], linestyle='--', label='Predicted')
-        ax2.set_xlabel('x')
-        ax2.set_ylabel('ψ(x)')
-        ax2.set_title('Wavefunction')
-        ax2.legend()
-        ax2.grid(True)
+        # Plot wavefunction magnitude
+        if torch.is_complex(ψ):
+            ψ_mag = torch.abs(ψ).cpu().numpy()
+            ψ_pred_mag = torch.abs(ψ_pred).cpu().numpy()
+            ψ_phase = torch.angle(ψ).cpu().numpy()
+            ψ_pred_phase = torch.angle(ψ_pred).cpu().numpy()
+            
+            # Magnitude plot
+            ax1.plot(x_np, ψ_mag, color=self.colors['wavefunction'], label='True Magnitude', linewidth=2)
+            ax1.plot(x_np, ψ_pred_mag, color=self.colors['prediction'], linestyle='--', label='Predicted Magnitude', linewidth=2)
+            ax1.set_xlabel('Position (x)', fontsize=12)
+            ax1.set_ylabel('Wavefunction Magnitude |ψ(x)|', fontsize=12)
+            ax1.set_title(f'Wavefunction Magnitude (Epoch {epoch})', fontsize=14, pad=20)
+            ax1.legend(fontsize=10)
+            ax1.grid(True, alpha=0.3)
+            ax1.tick_params(axis='both', which='major', labelsize=10)
+            
+            # Phase plot
+            ax2.plot(x_np, ψ_phase, color=self.colors['wavefunction'], label='True Phase', linewidth=2)
+            ax2.plot(x_np, ψ_pred_phase, color=self.colors['prediction'], linestyle='--', label='Predicted Phase', linewidth=2)
+            ax2.set_xlabel('Position (x)', fontsize=12)
+            ax2.set_ylabel('Wavefunction Phase (rad)', fontsize=12)
+            ax2.set_title('Wavefunction Phase', fontsize=14, pad=20)
+            ax2.legend(fontsize=10)
+            ax2.grid(True, alpha=0.3)
+            ax2.tick_params(axis='both', which='major', labelsize=10)
+            ax2.set_yticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi])
+            ax2.set_yticklabels([r'$-\pi$', r'$-\pi/2$', r'$0$', r'$\pi/2$', r'$\pi$'])
+            ax2.set_ylim([-np.pi * 1.1, np.pi * 1.1]) # Add some padding
+        else:
+            ψ_mag = ψ.cpu().numpy()
+            ψ_pred_mag = ψ_pred.cpu().numpy()
+            
+            ax1.plot(x_np, ψ_mag, color=self.colors['wavefunction'], label='True Wavefunction', linewidth=2)
+            ax1.plot(x_np, ψ_pred_mag, color=self.colors['prediction'], linestyle='--', label='Predicted Wavefunction', linewidth=2)
+            ax1.set_xlabel('Position (x)', fontsize=12)
+            ax1.set_ylabel('Wavefunction ψ(x)', fontsize=12)
+            ax1.set_title(f'Wavefunction (Epoch {epoch})', fontsize=14, pad=20)
+            ax1.legend(fontsize=10)
+            ax1.grid(True, alpha=0.3)
+            ax1.tick_params(axis='both', which='major', labelsize=10)
         
-        # Save plot
+        # Adjust layout and save
+        plt.tight_layout(pad=3.0) # Increase padding
         if save:
-            plt.tight_layout()
             save_path = self.save_dir / f'wavefunction_epoch_{epoch}.png'
-            plt.savefig(save_path, dpi=self.dpi)
+            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight', pad_inches=0.2)
             plt.close()
         else:
-            plt.tight_layout()
             plt.show()
             
     def plot_probability_density(self, x: torch.Tensor, ψ: torch.Tensor, 
                                ψ_pred: torch.Tensor, epoch: int, save: bool = True):
         """Plot probability density of wavefunction."""
         # Calculate probability densities
-        P_true = torch.abs(ψ)**2
-        P_pred = torch.abs(ψ_pred)**2
+        if torch.is_complex(ψ):
+            P_true = torch.abs(ψ)**2
+            P_pred = torch.abs(ψ_pred)**2
+        else:
+            P_true = ψ**2
+            P_pred = ψ_pred**2
         
         # Store in history
         self.history['probabilities'].append(P_true.detach().cpu().numpy())
         
         # Create plot
-        plt.figure(figsize=self.fig_size)
-        plt.plot(x.cpu().numpy(), P_true.cpu().numpy(), 
-                color=self.colors['probability'], label='True')
-        plt.plot(x.cpu().numpy(), P_pred.cpu().numpy(), 
-                color=self.colors['prediction'], linestyle='--', label='Predicted')
-        plt.xlabel('x')
-        plt.ylabel('|ψ(x)|²')
-        plt.title(f'Probability Density (Epoch {epoch})')
-        plt.legend()
-        plt.grid(True)
+        plt.figure(figsize=(12, 8), dpi=150)
+        
+        # Convert tensors to numpy arrays
+        x_np = x.cpu().numpy()
+        P_true_np = P_true.cpu().numpy()
+        P_pred_np = P_pred.cpu().numpy()
+        
+        plt.plot(x_np, P_true_np, color=self.colors['probability'], label='True', linewidth=2)
+        plt.plot(x_np, P_pred_np, color=self.colors['prediction'], linestyle='--', label='Predicted', linewidth=2)
+        plt.xlabel('Position (x)', fontsize=12)
+        plt.ylabel('Probability Density |ψ(x)|²', fontsize=12)
+        plt.title(f'Probability Density (Epoch {epoch})', fontsize=14, pad=20)
+        plt.legend(fontsize=10)
+        plt.grid(True, alpha=0.3)
+        plt.tick_params(axis='both', which='major', labelsize=10)
         
         # Save plot
         if save:
             save_path = self.save_dir / f'probability_epoch_{epoch}.png'
-            plt.savefig(save_path, dpi=self.dpi)
+            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight', pad_inches=0.2)
             plt.close()
         else:
             plt.tight_layout()
             plt.show()
             
-    def create_animation(self, x: torch.Tensor, save_path: str, fps: int = 5):
-        """Create animation of wavefunction evolution."""
-        if len(self.history['wavefunctions']) < 2:
-            logger.warning("Not enough history to create animation")
+    def create_animation(self, x: torch.Tensor, predictions_history: List[torch.Tensor],
+                        save_path: str, fps: int = 5):
+        """Create animation of predicted wavefunction evolution.
+        
+        Args:
+            x: Position tensor.
+            predictions_history: List of predicted wavefunction tensors over time.
+            save_path: Path to save the animation.
+            fps: Frames per second.
+        """
+        if not predictions_history:
+            logger.warning("No prediction history available to create animation")
             return
             
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=self.fig_size)
+        # Determine if we need two subplots (magnitude and phase)
+        is_complex = torch.is_complex(predictions_history[0])
+        if is_complex:
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=self.fig_size, dpi=150)
+        else:
+            fig, ax1 = plt.subplots(1, 1, figsize=self.fig_size, dpi=150)
+        
+        x_np = x.cpu().numpy()
         
         def update(frame):
-            ax1.clear()
-            ax2.clear()
+            if is_complex:
+                ax1.clear()
+                ax2.clear()
+            else:
+                ax1.clear()
             
-            # Plot potential
-            ax1.plot(x.cpu().numpy(), self.history['potentials'][frame], 
-                    color=self.colors['potential'], label='Potential')
-            ax1.set_xlabel('x')
-            ax1.set_ylabel('V(x)')
-            ax1.set_title(f'Potential Energy (Frame {frame})')
-            ax1.legend()
-            ax1.grid(True)
+            # Plot wavefunction magnitude
+            ψ_pred = predictions_history[frame]
+            if torch.is_complex(ψ_pred):
+                ψ_pred_mag = torch.abs(ψ_pred).cpu().numpy()
+                ψ_pred_phase = torch.angle(ψ_pred).cpu().numpy()
+            else:
+                ψ_pred_mag = ψ_pred.cpu().numpy()
+                
+            # Magnitude plot
+            ax1.plot(x_np, ψ_pred_mag, color=self.colors['prediction'], label='Predicted Magnitude', linewidth=2)
+            ax1.set_xlabel('Position (x)', fontsize=12)
+            ax1.set_ylabel('Wavefunction Magnitude |ψ(x)|', fontsize=12)
+            ax1.set_title(f'Predicted Wavefunction Evolution - Magnitude (Frame {frame})', fontsize=14, pad=20)
+            ax1.legend(fontsize=10)
+            ax1.grid(True, alpha=0.3)
+            ax1.tick_params(axis='both', which='major', labelsize=10)
             
-            # Plot wavefunction
-            ax2.plot(x.cpu().numpy(), self.history['wavefunctions'][frame], 
-                    color=self.colors['wavefunction'], label='True')
-            ax2.plot(x.cpu().numpy(), self.history['predictions'][frame], 
-                    color=self.colors['prediction'], linestyle='--', label='Predicted')
-            ax2.set_xlabel('x')
-            ax2.set_ylabel('ψ(x)')
-            ax2.set_title('Wavefunction')
-            ax2.legend()
-            ax2.grid(True)
+            # Phase plot for complex numbers
+            if is_complex:
+                ax2.plot(x_np, ψ_pred_phase, color=self.colors['prediction'], label='Predicted Phase', linewidth=2)
+                ax2.set_xlabel('Position (x)', fontsize=12)
+                ax2.set_ylabel('Wavefunction Phase (rad)', fontsize=12)
+                ax2.set_title(f'Predicted Wavefunction Evolution - Phase (Frame {frame})', fontsize=14, pad=20)
+                ax2.legend(fontsize=10)
+                ax2.grid(True, alpha=0.3)
+                ax2.tick_params(axis='both', which='major', labelsize=10)
+                ax2.set_yticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi])
+                ax2.set_yticklabels([r'$-\pi$', r'$-\pi/2$', r'$0$', r'$\pi/2$', r'$\pi$'])
+                ax2.set_ylim([-np.pi * 1.1, np.pi * 1.1]) # Add some padding
             
-            plt.tight_layout()
+            plt.tight_layout(pad=3.0)
             
         # Create animation
-        anim = FuncAnimation(fig, update, frames=len(self.history['wavefunctions']),
+        anim = FuncAnimation(fig, update, frames=len(predictions_history),
                            interval=1000//fps, blit=False)
         
         # Save animation
-        anim.save(save_path, writer='pillow', fps=fps)
-        plt.close()
+        try:
+            anim.save(save_path, writer='pillow', fps=fps)
+            logger.info(f"Animation saved to {save_path}")
+        except Exception as e:
+            logger.error(f"Failed to save animation: {str(e)}")
+        finally:
+            plt.close()
         
     def plot_energy_evolution(self, save: bool = True):
         """Plot evolution of energy levels over training."""
@@ -368,11 +437,12 @@ class ModelProfiler:
             fps: Frames per second
             window_size: Number of epochs to show in the sliding window
         """
-        if len(self.metrics['gpu_memory']) < 2:
-            logger.warning("Not enough resource history to create animation")
+        if not hasattr(self, 'resource_history') or len(self.resource_history) < 2:
+            logger.warning("Not enough resource history data to create animation")
             return
             
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=self.fig_size)
+        # Create figure and axes
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), dpi=150)
         
         def update(frame):
             ax1.clear()
@@ -492,7 +562,7 @@ class ModelProfiler:
 class SillyAIVisualizerPlugin(SillyPlugin):
     """Plugin for visualizing model training progress and wavefunction evolution."""
     
-    def __init__(self, save_dir: str = "visualizations"):
+    def __init__(self, save_dir: str = "profiles"):
         super().__init__()
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True)
@@ -521,11 +591,6 @@ class SillyAIVisualizerPlugin(SillyPlugin):
             'cpu_percent': [],
             'gpu_percent': []
         }
-        
-        # Create subdirectories
-        (self.save_dir / 'metrics').mkdir(exist_ok=True)
-        (self.save_dir / 'wavefunctions').mkdir(exist_ok=True)
-        (self.save_dir / 'resources').mkdir(exist_ok=True)
         
     def on_init(self, model):
         """Initialize visualization plugin."""
@@ -629,25 +694,43 @@ class SillyAIVisualizerPlugin(SillyPlugin):
         
         # Plot memory usage
         plt.subplot(2, 2, 1)
-        plt.plot(self.resource_history['memory'], label='RAM')
-        plt.plot(self.resource_history['gpu_memory'], label='GPU Memory')
+        plt.plot(self.resource_history['memory'], label='RAM', color='#1f77b4')
+        plt.plot(self.resource_history['gpu_memory'], label='GPU Memory', color='#ff7f0e')
         plt.xlabel('Epoch')
         plt.ylabel('Memory (MB)')
+        plt.title('Memory Usage Over Time')
         plt.legend()
-        plt.title('Memory Usage')
+        plt.grid(True, alpha=0.3)
         
-        # Plot CPU/GPU usage
+        # Plot CPU usage
         plt.subplot(2, 2, 2)
-        plt.plot(self.resource_history['cpu_percent'], label='CPU')
-        plt.plot(self.resource_history['gpu_percent'], label='GPU')
+        plt.plot(self.resource_history['cpu_percent'], label='CPU Usage', color='#2ca02c')
         plt.xlabel('Epoch')
         plt.ylabel('Usage (%)')
+        plt.title('CPU Usage Over Time')
         plt.legend()
-        plt.title('CPU/GPU Usage')
+        plt.grid(True, alpha=0.3)
+        
+        # Plot GPU usage
+        plt.subplot(2, 2, 3)
+        plt.plot(self.resource_history['gpu_percent'], label='GPU Usage', color='#d62728')
+        plt.xlabel('Epoch')
+        plt.ylabel('Usage (%)')
+        plt.title('GPU Usage Over Time')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Add epoch information
+        plt.subplot(2, 2, 4)
+        plt.text(0.1, 0.5, f'Epoch: {epoch}\nTotal Memory: {self.resource_history["memory"][-1]:.1f} MB\nGPU Memory: {self.resource_history["gpu_memory"][-1]:.1f} MB\nCPU Usage: {self.resource_history["cpu_percent"][-1]:.1f}%\nGPU Usage: {self.resource_history["gpu_percent"][-1]:.1f}%', 
+                fontsize=12, bbox=dict(facecolor='white', alpha=0.8))
+        plt.axis('off')
         
         # Save plot
         plt.tight_layout()
-        plt.savefig(self.save_dir / 'resources' / f'resources_epoch_{epoch}.png')
+        save_path = self.save_dir / 'resource_usage' / f'resource_usage_epoch_{epoch}.png'
+        save_path.parent.mkdir(exist_ok=True)  # Create directory if it doesn't exist
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
         
     def plot_wavefunction(self, x: torch.Tensor, V: torch.Tensor, ψ: torch.Tensor, 
@@ -661,22 +744,50 @@ class SillyAIVisualizerPlugin(SillyPlugin):
         # Create plot
         plt.figure(figsize=(12, 8))
         
-        # Plot potential
-        plt.subplot(2, 1, 1)
-        plt.plot(x.cpu().numpy(), V.cpu().numpy(), 'k-', label='Potential')
-        plt.xlabel('x')
-        plt.ylabel('V(x)')
-        plt.title(f'Potential Energy (Epoch {epoch})')
-        plt.legend()
-        
-        # Plot wavefunction
-        plt.subplot(2, 1, 2)
-        plt.plot(x.cpu().numpy(), ψ.cpu().numpy(), 'b-', label='True')
-        plt.plot(x.cpu().numpy(), ψ_pred.cpu().numpy(), 'r--', label='Predicted')
-        plt.xlabel('x')
-        plt.ylabel('ψ(x)')
-        plt.title('Wavefunction')
-        plt.legend()
+        # Plot wavefunction magnitude
+        if torch.is_complex(ψ):
+            ψ_mag = torch.abs(ψ).cpu().numpy()
+            ψ_pred_mag = torch.abs(ψ_pred).cpu().numpy()
+            
+            # Magnitude plot
+            plt.subplot(2, 1, 1)
+            plt.plot(x.cpu().numpy(), ψ_mag, color=self.colors['wavefunction'], label='True Magnitude', linewidth=2)
+            plt.plot(x.cpu().numpy(), ψ_pred_mag, color=self.colors['prediction'], linestyle='--', label='Predicted Magnitude', linewidth=2)
+            plt.xlabel('Position (x)', fontsize=12)
+            plt.ylabel('Wavefunction Magnitude |ψ(x)|', fontsize=12)
+            plt.title(f'Wavefunction Magnitude (Epoch {epoch})', fontsize=14, pad=20)
+            plt.legend(fontsize=10)
+            plt.grid(True, alpha=0.3)
+            plt.tick_params(axis='both', which='major', labelsize=10)
+            
+            # Phase plot
+            plt.subplot(2, 1, 2)
+            ψ_phase = torch.angle(ψ).cpu().numpy()
+            ψ_pred_phase = torch.angle(ψ_pred).cpu().numpy()
+            plt.plot(x.cpu().numpy(), ψ_phase, color=self.colors['wavefunction'], label='True Phase', linewidth=2)
+            plt.plot(x.cpu().numpy(), ψ_pred_phase, color=self.colors['prediction'], linestyle='--', label='Predicted Phase', linewidth=2)
+            plt.xlabel('Position (x)', fontsize=12)
+            plt.ylabel('Wavefunction Phase (rad)', fontsize=12)
+            plt.title('Wavefunction Phase', fontsize=14, pad=20)
+            plt.legend(fontsize=10)
+            plt.grid(True, alpha=0.3)
+            plt.tick_params(axis='both', which='major', labelsize=10)
+            plt.set_yticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi])
+            plt.set_yticklabels([r'$-\pi$', r'$-\pi/2$', r'$0$', r'$\pi/2$', r'$\pi$'])
+            plt.set_ylim([-np.pi * 1.1, np.pi * 1.1]) # Add some padding
+        else:
+            ψ_mag = ψ.cpu().numpy()
+            ψ_pred_mag = ψ_pred.cpu().numpy()
+            
+            plt.subplot(2, 1, 1)
+            plt.plot(x.cpu().numpy(), ψ_mag, color=self.colors['wavefunction'], label='True Wavefunction', linewidth=2)
+            plt.plot(x.cpu().numpy(), ψ_pred_mag, color=self.colors['prediction'], linestyle='--', label='Predicted Wavefunction', linewidth=2)
+            plt.xlabel('Position (x)', fontsize=12)
+            plt.ylabel('Wavefunction ψ(x)', fontsize=12)
+            plt.title(f'Wavefunction (Epoch {epoch})', fontsize=14, pad=20)
+            plt.legend(fontsize=10)
+            plt.grid(True, alpha=0.3)
+            plt.tick_params(axis='both', which='major', labelsize=10)
         
         # Save plot
         plt.tight_layout()
@@ -691,19 +802,19 @@ class SillyAIVisualizerPlugin(SillyPlugin):
             ax1.clear()
             ax2.clear()
             
-            # Plot potential
-            ax1.plot(self.x, self.potential_history[frame], 'k-', label='Potential')
-            ax1.set_xlabel('x')
-            ax1.set_ylabel('V(x)')
-            ax1.set_title(f'Potential Energy (Frame {frame})')
+            # Plot wavefunction
+            ax1.plot(self.x, self.wavefunction_history[frame], 'b-', label='True')
+            ax1.plot(self.x, self.prediction_history[frame], 'r--', label='Predicted')
+            ax1.set_xlabel('Position (x)', fontsize=12)
+            ax1.set_ylabel('Wavefunction ψ(x)', fontsize=12)
+            ax1.set_title(f'Wavefunction (Frame {frame})')
             ax1.legend()
             
-            # Plot wavefunction
-            ax2.plot(self.x, self.wavefunction_history[frame], 'b-', label='True')
-            ax2.plot(self.x, self.prediction_history[frame], 'r--', label='Predicted')
-            ax2.set_xlabel('x')
-            ax2.set_ylabel('ψ(x)')
-            ax2.set_title('Wavefunction')
+            # Plot potential
+            ax2.plot(self.x, self.potential_history[frame], 'k-', label='Potential')
+            ax2.set_xlabel('Position (x)', fontsize=12)
+            ax2.set_ylabel('Potential Energy V(x)', fontsize=12)
+            ax2.set_title('Potential Energy')
             ax2.legend()
             
             plt.tight_layout()
@@ -735,7 +846,7 @@ class SillyAIVisualizerPlugin(SillyPlugin):
         self.potential_history = state['potential_history']
         self.prediction_history = state['prediction_history']
 
-def find_best_model(model_dir: str = ".") -> Optional[str]:
+def find_best_model(model_dir: str = "checkpoints") -> Optional[str]:
     """Find the best model checkpoint."""
     model_dir = Path(model_dir)
     checkpoints = list(model_dir.glob("best_*.pt"))
@@ -746,12 +857,16 @@ def find_best_model(model_dir: str = ".") -> Optional[str]:
     checkpoints.sort(key=lambda x: x.stat().st_mtime, reverse=True)
     return str(checkpoints[0])
 
-def load_best_model(model, model_dir: str = ".") -> bool:
+def load_best_model(model, model_dir: str = "checkpoints") -> bool:
     """Load the best model checkpoint if available."""
     best_path = find_best_model(model_dir)
     if best_path:
         try:
-            model.load_state_dict(torch.load(best_path))
+            checkpoint = torch.load(best_path)
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                model.load_state_dict(checkpoint)
             print(f"\033[92m✓ Loaded best model from {best_path}\033[0m")
             return True
         except Exception as e:

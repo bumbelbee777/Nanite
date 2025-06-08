@@ -15,73 +15,7 @@ from .config import ModelConfig, PrecisionLevel, Modality
 from .ops import MultivectorOps
 from .plugins.trainer import SillyAITrainerPlugin
 from .plugins.visualizer import SillyAIVisualizerPlugin, ModelProfiler
-
-class DynamicLearningRate:
-    """Manages dynamic learning rate scheduling with reward/punishment mechanisms."""
-    
-    def __init__(self, initial_lr=5e-4, min_lr=1e-6, max_lr=1e-3, 
-                 warmup_steps=100, reward_factor=1.1, punishment_factor=0.9,
-                 patience=3, min_delta=1e-4):
-        self.initial_lr = initial_lr
-        self.min_lr = min_lr
-        self.max_lr = max_lr
-        self.warmup_steps = warmup_steps
-        self.reward_factor = reward_factor
-        self.punishment_factor = punishment_factor
-        self.patience = patience
-        self.min_delta = min_delta
-        
-        self.current_lr = initial_lr
-        self.best_loss = float('inf')
-        self.no_improvement_count = 0
-        self.step_count = 0
-        self.reward_history = []
-        
-    def step(self, loss, optimizer):
-        """Update learning rate based on loss improvement."""
-        self.step_count += 1
-        
-        # Warmup phase
-        if self.step_count <= self.warmup_steps:
-            self.current_lr = self.initial_lr * (self.step_count / self.warmup_steps)
-            self._update_optimizer(optimizer)
-            return
-            
-        # Check for improvement
-        if loss < (self.best_loss - self.min_delta):
-            # Reward: Increase learning rate
-            self.current_lr = min(self.current_lr * self.reward_factor, self.max_lr)
-            self.best_loss = loss
-            self.no_improvement_count = 0
-            self.reward_history.append(1)  # 1 for reward
-        else:
-            # Punishment: Decrease learning rate
-            self.current_lr = max(self.current_lr * self.punishment_factor, self.min_lr)
-            self.no_improvement_count += 1
-            self.reward_history.append(-1)  # -1 for punishment
-            
-        # Update optimizer
-        self._update_optimizer(optimizer)
-        
-    def _update_optimizer(self, optimizer):
-        """Update optimizer learning rate."""
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = self.current_lr
-            
-    def get_reward_stats(self):
-        """Get statistics about rewards and punishments."""
-        if not self.reward_history:
-            return {"rewards": 0, "punishments": 0, "ratio": 0}
-            
-        rewards = sum(1 for x in self.reward_history if x > 0)
-        punishments = sum(1 for x in self.reward_history if x < 0)
-        ratio = rewards / (rewards + punishments) if (rewards + punishments) > 0 else 0
-        
-        return {
-            "rewards": rewards,
-            "punishments": punishments,
-            "ratio": ratio
-        }
+from .plugins.dynamic_learning_rate import DynamicLearningRate
 
 class SchrödingerDataset(Dataset):
     def __init__(self, seq_len=64, potential_type='harmonic', num_samples=1000, 
@@ -219,16 +153,17 @@ async def main():
         visualizer.on_init(model)
         profiler = ModelProfiler(save_dir="profiles")
         
-        # Create directories for visualizations
+        # Create directories for visualizations and checkpoints
         os.makedirs("profiles", exist_ok=True)
         os.makedirs("wavefunctions", exist_ok=True)
+        os.makedirs("checkpoints", exist_ok=True)
         
         # Load existing weights if found
-        if os.path.exists('best.pt'):
+        if os.path.exists('checkpoints/best.pt'):
             console.print("[green]💾 Found existing model checkpoint[/green]")
             try:
                 # Load checkpoint
-                checkpoint = torch.load('best.pt')
+                checkpoint = torch.load('checkpoints/best.pt')
                 
                 # Check if it's a state dict or full checkpoint
                 if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
@@ -319,12 +254,12 @@ async def main():
                     # Validation phase
                     val_loss = await trainer.validate()
                     
-                    # Update learning rate based on validation loss
-                    old_lr = trainer.optimizer.param_groups[0]['lr']
-                    trainer.scheduler.step(val_loss)
-                    new_lr = trainer.optimizer.param_groups[0]['lr']
+                    # Update learning rate based on validation loss using DynamicLearningRate
+                    old_lr = lr_manager.current_lr
+                    lr_manager.step(val_loss, trainer.optimizer)
+                    new_lr = lr_manager.current_lr
                     if new_lr != old_lr:
-                        print(f"\n\033[93m📉 Reducing learning rate from {old_lr:.2e} to {new_lr:.2e}\033[0m")
+                        print(f"\n\033[93m📉 Learning rate changed from {old_lr:.2e} to {new_lr:.2e}\033[0m")
                     
                     # Inference test
                     test_loss = await trainer.run_inference_test()
@@ -346,6 +281,30 @@ async def main():
                     # End epoch profiling
                     profiler.end_epoch(current_epoch, metrics)
                     
+                    # Save checkpoint if validation loss improved
+                    if val_loss < trainer.best_loss:
+                        trainer.best_loss = val_loss
+                        # Save epoch checkpoint
+                        torch.save({
+                            'epoch': current_epoch,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': trainer.optimizer.state_dict(),
+                            'val_loss': val_loss,
+                            'train_loss': train_loss,
+                            'test_loss': test_loss
+                        }, f'checkpoints/best_epoch_{current_epoch}.pt')
+                        
+                        # Save best overall model
+                        torch.save({
+                            'epoch': current_epoch,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': trainer.optimizer.state_dict(),
+                            'val_loss': val_loss,
+                            'train_loss': train_loss,
+                            'test_loss': test_loss
+                        }, 'checkpoints/best.pt')
+                        print(f"\n\033[92m💾 New best model saved! (Loss: {val_loss:.4e})\033[0m")
+                    
                     # Create visualizations every 5 epochs
                     if current_epoch % 5 == 0:
                         # Create resource usage animation
@@ -360,31 +319,27 @@ async def main():
                         
                         # Get and display resource summary
                         summary = profiler.get_resource_summary()
-                        console.print("\n[cyan]Resource Usage Summary:[/cyan]")
+                        console.print("\n[bold cyan]📊 Resource Usage Summary:[/bold cyan]")
                         for metric, stats in summary.items():
-                            console.print(f"  {metric}:")
+                            unit = "MB" if "memory" in metric else "s" if "time" in metric else "%"
+                            console.print(f"\n[cyan]  {metric.replace('_', ' ').title()}:[/cyan]")
                             for stat, value in stats.items():
-                                console.print(f"    {stat}: {value:.2f}")
+                                if stat == 'latest':
+                                    console.print(f"    [green]Current:[/green] {value:.2f} {unit}")
+                                else:
+                                    console.print(f"    {stat.title()}: {value:.2f} {unit}")
                         
                         # Get and display reward statistics
                         reward_stats = lr_manager.get_reward_stats()
-                        console.print("\n[cyan]Learning Progress:[/cyan]")
-                        console.print(f"  Rewards: {reward_stats['rewards']}")
-                        console.print(f"  Punishments: {reward_stats['punishments']}")
-                        console.print(f"  Reward Ratio: {reward_stats['ratio']:.2%}")
+                        console.print("\n[bold cyan]🎯 Learning Progress:[/bold cyan]")
+                        console.print(f"  [green]Rewards:[/green] {reward_stats['rewards']} ↑")
+                        console.print(f"  [red]Punishments:[/red] {reward_stats['punishments']} ↓")
+                        console.print(f"  [yellow]Reward Ratio:[/yellow] {reward_stats['ratio']:.2%}")
                         
                         # Print current learning rate and difficulty
-                        console.print(f"\n[cyan]Current learning rate: {new_lr:.2e}[/cyan]")
-                        console.print(f"[cyan]Current difficulty level: {difficulty}/{num_difficulty_levels}[/cyan]")
-            
-        # Print top concepts
-        model.print_concepts(top_k=10)
-
-        # Generate and print example bytecode
-        bytecode = model.generate_bytecode()
-        console.print("\n[bold blue]Example bytecode from concept graph:[/bold blue]")
-        for idx, (op, args) in enumerate(bytecode):
-            console.print(f"  {idx:03d}: {op} {args}")
+                        console.print(f"\n[bold cyan]⚡ Current Status:[/bold cyan]")
+                        console.print(f"  [blue]Learning Rate:[/blue] {new_lr:.2e}")
+                        console.print(f"  [magenta]Difficulty Level:[/magenta] {difficulty}/{num_difficulty_levels}")
             
         # Create final resource usage visualization
         profiler.create_resource_animation(
@@ -396,18 +351,22 @@ async def main():
         
         # Display final resource summary
         final_summary = profiler.get_resource_summary()
-        console.print("\n[bold green]Final Resource Usage Summary:[/bold green]")
+        console.print("\n[bold green]📊 Final Resource Usage Summary:[/bold green]")
         for metric, stats in final_summary.items():
-            console.print(f"  {metric}:")
+            unit = "MB" if "memory" in metric else "s" if "time" in metric else "%"
+            console.print(f"\n[green]  {metric.replace('_', ' ').title()}:[/green]")
             for stat, value in stats.items():
-                console.print(f"    {stat}: {value:.2f}")
+                if stat == 'latest':
+                    console.print(f"    [green]Final:[/green] {value:.2f} {unit}")
+                else:
+                    console.print(f"    {stat.title()}: {value:.2f} {unit}")
                 
         # Display final learning statistics
         final_reward_stats = lr_manager.get_reward_stats()
-        console.print("\n[bold green]Final Learning Statistics:[/bold green]")
-        console.print(f"  Total Rewards: {final_reward_stats['rewards']}")
-        console.print(f"  Total Punishments: {final_reward_stats['punishments']}")
-        console.print(f"  Final Reward Ratio: {final_reward_stats['ratio']:.2%}")
+        console.print("\n[bold green]🎯 Final Learning Statistics:[/bold green]")
+        console.print(f"  [green]Total Rewards:[/green] {final_reward_stats['rewards']} ↑")
+        console.print(f"  [red]Total Punishments:[/red] {final_reward_stats['punishments']} ↓")
+        console.print(f"  [yellow]Final Reward Ratio:[/yellow] {final_reward_stats['ratio']:.2%}")
         
     finally:
         await ops.cache.stop()  # Stop the cache worker

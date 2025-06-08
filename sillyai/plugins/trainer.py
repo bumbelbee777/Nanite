@@ -11,6 +11,8 @@ import os
 import time
 from datetime import timedelta
 import asyncio
+from pathlib import Path
+from .dynamic_learning_rate import DynamicLearningRate
 
 class SillyAITrainerPlugin(SillyPlugin):
     """
@@ -35,6 +37,13 @@ class SillyAITrainerPlugin(SillyPlugin):
         self.ψ_history = []  # Store wavefunction history for animation
         self.weight_decay = 0.0  # Initialize weight decay parameter
         self.loop = asyncio.get_event_loop()  # Get event loop for async operations
+        self.x_tensor = None  # Store x tensor for visualization
+        self.lr_manager = None  # Store learning rate manager
+        
+        # Create checkpoints directory
+        self.checkpoint_dir = Path("checkpoints")
+        self.checkpoint_dir.mkdir(exist_ok=True)
+        self.best_loss = float('inf')
 
     def setup(self, model, ops, train_dataset=None, val_dataset=None, batch_size=32, 
              seq_len=64, lr=1e-3, epochs=10, early_stop=5, weight_decay=0.0):
@@ -48,6 +57,16 @@ class SillyAITrainerPlugin(SillyPlugin):
         self.epochs = epochs
         self.early_stop = early_stop
         self.weight_decay = weight_decay
+        self.device = next(model.parameters()).device
+        
+        # Initialize visualizer
+        self.visualizer = WavefunctionVisualizer()
+        
+        # Initialize profiler
+        self.profiler = ModelProfiler(save_dir="profiles")
+        
+        # Create x tensor for visualization
+        self.x_tensor = torch.linspace(-1, 1, seq_len).to(self.device)
         
         # Create data loaders
         if train_dataset:
@@ -73,6 +92,18 @@ class SillyAITrainerPlugin(SillyPlugin):
             weight_decay=weight_decay
         )
         
+        # Initialize learning rate manager
+        self.lr_manager = DynamicLearningRate(
+            initial_lr=lr,
+            min_lr=1e-6,
+            max_lr=1e-3,
+            warmup_steps=100,
+            reward_factor=1.1,
+            punishment_factor=0.9,
+            patience=3,
+            min_delta=1e-4
+        )
+        
         # Initialize custom loss function
         self.criterion = ComplexLoss(
             concept_graph=model.concept_graph,
@@ -82,7 +113,7 @@ class SillyAITrainerPlugin(SillyPlugin):
         
         # Log setup configuration
         print("\n[SillyAITrainerPlugin] Setup configuration:")
-        print(f"  Device: {next(model.parameters()).device}")
+        print(f"  Device: {self.device}")
         print(f"  Batch size: {batch_size}")
         print(f"  Learning rate: {lr}")
         print(f"  Weight decay: {weight_decay}")
@@ -107,15 +138,49 @@ class SillyAITrainerPlugin(SillyPlugin):
             V = V.to(self.model.device)
             psi = psi.to(self.model.device)
             
+            # Debug logging
+            # print(f"\nBatch {batch_idx} shapes:")
+            # print(f"V shape: {V.shape}, V stats: min={V.min().item():.4f}, max={V.max().item():.4f}, mean={V.mean().item():.4f}")
+            # print(f"psi shape: {psi.shape}, psi stats: min={psi.min().item():.4f}, max={psi.max().item():.4f}, mean={psi.mean().item():.4f}")
+            
             # Forward pass
             self.optimizer.zero_grad()
             psi_pred = await self._forward_pass(V)
             
+            # Debug logging for predictions with complex number handling
+            # print(f"psi_pred shape: {psi_pred.shape}")
+            # if torch.is_complex(psi_pred):
+            #    print(f"psi_pred stats (magnitude): min={torch.abs(psi_pred).min().item():.4f}, max={torch.abs(psi_pred).max().item():.4f}, mean={torch.abs(psi_pred).mean().item():.4f}")
+            #     print(f"psi_pred phase: min={torch.angle(psi_pred).min().item():.4f}, max={torch.angle(psi_pred).max().item():.4f}, mean={torch.angle(psi_pred).mean().item():.4f}")
+            # else:
+            #    print(f"psi_pred stats: min={psi_pred.min().item():.4f}, max={psi_pred.max().item():.4f}, mean={psi_pred.mean().item():.4f}")
+            
             # Calculate loss using complex loss
             loss = self.criterion(psi_pred, psi)
             
+            # Debug logging for loss components
+            if torch.isnan(loss):
+                print("\nNaN loss detected! Breaking down components:")
+                pred_real, pred_imag = psi_pred.real, psi_pred.imag
+                target_real, target_imag = psi.real, psi.imag
+                real_loss = torch.mean((pred_real - target_real) ** 2)
+                imag_loss = torch.mean((pred_imag - target_imag) ** 2)
+                print(f"Real loss: {real_loss.item():.4f}")
+                print(f"Imag loss: {imag_loss.item():.4f}")
+                print(f"Phase loss: {self.criterion._compute_phase_loss(psi_pred, psi).item():.4f}")
+                print(f"Concept loss: {self.criterion._compute_concept_loss(psi_pred).item():.4f}")
+            
             # Backward pass
             loss.backward()
+            
+            # Debug logging for gradients
+            if torch.isnan(loss):
+                print("\nGradient stats:")
+                for name, param in self.model.named_parameters():
+                    if param.grad is not None:
+                        grad_norm = param.grad.norm().item()
+                        print(f"{name}: grad_norm={grad_norm:.4f}")
+            
             self.optimizer.step()
             
             # Update statistics
@@ -174,12 +239,12 @@ class SillyAITrainerPlugin(SillyPlugin):
             # Validation phase
             val_loss = self.loop.run_until_complete(self.validate())
             
-            # Update learning rate based on validation loss
-            old_lr = self.optimizer.param_groups[0]['lr']
-            self.scheduler.step(val_loss)
-            new_lr = self.optimizer.param_groups[0]['lr']
+            # Update learning rate based on validation loss using DynamicLearningRate
+            old_lr = self.lr_manager.current_lr
+            self.lr_manager.step(val_loss, self.optimizer)
+            new_lr = self.lr_manager.current_lr
             if new_lr != old_lr:
-                print(f"\n\033[93m📉 Reducing learning rate from {old_lr:.2e} to {new_lr:.2e}\033[0m")
+                print(f"\n\033[93m📉 Learning rate changed from {old_lr:.2e} to {new_lr:.2e}\033[0m")
             
             # Inference test
             test_loss = self.loop.run_until_complete(self.run_inference_test())
@@ -189,7 +254,7 @@ class SillyAITrainerPlugin(SillyPlugin):
                 'train_loss': train_loss,
                 'val_loss': val_loss,
                 'test_loss': test_loss,
-                'learning_rate': self.optimizer.param_groups[0]['lr']
+                'learning_rate': new_lr
             }
             self.profiler.end_epoch(ep, metrics)
             
@@ -200,7 +265,28 @@ class SillyAITrainerPlugin(SillyPlugin):
             if val_loss < best_val * 0.999:  # Require at least 0.1% improvement
                 best_val = val_loss
                 no_imp = 0
-                torch.save(self.model.state_dict(), f'best_epoch_{ep}.pt')
+                # Save epoch checkpoint
+                torch.save({
+                    'epoch': ep,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'val_loss': val_loss,
+                    'train_loss': train_loss,
+                    'test_loss': test_loss
+                }, self.checkpoint_dir / f'best_epoch_{ep}.pt')
+                
+                # Update best overall model if this is the best so far
+                if val_loss < self.best_loss:
+                    self.best_loss = val_loss
+                    torch.save({
+                        'epoch': ep,
+                        'model_state_dict': self.model.state_dict(),
+                        'optimizer_state_dict': self.optimizer.state_dict(),
+                        'val_loss': val_loss,
+                        'train_loss': train_loss,
+                        'test_loss': test_loss
+                    }, self.checkpoint_dir / 'best.pt')
+                    print(f"\n\033[92m💾 New best model saved! (Loss: {val_loss:.4e})\033[0m")
                 improved = True
             else:
                 no_imp += 1
@@ -211,7 +297,6 @@ class SillyAITrainerPlugin(SillyPlugin):
             elapsed = time.time() - start_time
             remaining_epochs = self.epochs - ep
             eta_sec = (elapsed / ep) * remaining_epochs
-            lr = self.optimizer.param_groups[0]['lr']
             
             bar_len = 30
             progress = min(no_imp / self.early_stop_patience, 1.0)
@@ -219,7 +304,7 @@ class SillyAITrainerPlugin(SillyPlugin):
             
             print(f"\033[1mEpoch {ep:3d}/{self.epochs} \033[93m⏳{timedelta(seconds=int(epoch_time))}\033[0m "
                   f"| Train \033[91m{train_loss:.4e}\033[0m | Val \033[91m{val_loss:.4e}\033[0m | "
-                  f"Test \033[91m{test_loss:.4e}\033[0m | LR \033[96m{lr:.2e}\033[0m | "
+                  f"Test \033[91m{test_loss:.4e}\033[0m | LR \033[96m{new_lr:.2e}\033[0m | "
                   f"ETA \033[95m{timedelta(seconds=int(eta_sec))}\033[0m\n"
                   f"  EarlyStop [{bar}] {no_imp}/{self.early_stop_patience} "
                   f"{'✅ Improved!' if improved else '❌ No improvement'}\n")
@@ -232,12 +317,13 @@ class SillyAITrainerPlugin(SillyPlugin):
         print(f"\033[92m🎉 Training complete in {timedelta(seconds=int(total_time))} 🎉\033[0m\n")
         
         # Create final animation of wavefunction evolution
-        self.visualizer.create_animation(
-            self.x_tensor,
-            torch.zeros_like(self.x_tensor),  # Placeholder for potential
-            self.ψ_history,
-            "visualizations/wavefunction_evolution.gif"
-        )
+        if self.visualizer is not None and len(self.ψ_history) > 1:
+            self.visualizer.create_animation(
+                self.x_tensor,
+                torch.zeros_like(self.x_tensor),  # Placeholder for potential
+                self.ψ_history,
+                "profiles/wavefunction_evolution.gif"
+            )
 
     async def run_inference_test(self):
         """Run inference test on a small batch of data."""
@@ -257,12 +343,25 @@ class SillyAITrainerPlugin(SillyPlugin):
             # Store prediction for animation
             self.ψ_history.append(ψ_pred[0])
             
-            # Visualize wavefunction
-            self.visualizer.plot_wavefunction(
-                x[0], V[0], ψ[0], ψ_pred[0],
-                epoch=len(self.ψ_history),
-                save=True
-            )
+            # Visualize wavefunction if visualizer is available
+            if self.visualizer is not None:
+                try:
+                    # Plot wavefunction magnitude
+                    self.visualizer.plot_wavefunction(
+                        x[0], V[0], ψ[0], ψ_pred[0],
+                        epoch=len(self.ψ_history),
+                        save=True
+                    )
+                    
+                    # Create animation if we have enough history
+                    if len(self.ψ_history) > 1:
+                        self.visualizer.create_animation(
+                            x[0],
+                            self.ψ_history,
+                            f"profiles/wavefunction_evolution.gif"
+                        )
+                except Exception as e:
+                    print(f"\n\033[93m⚠️ Warning: Failed to plot wavefunction: {str(e)}\033[0m")
             
             # Compute loss
             if not ψ.is_complex():
