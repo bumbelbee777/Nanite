@@ -59,7 +59,7 @@ class TaskComplexityEstimator(nn.Module):
         from .config import ModelConfig
         from .ops import MultivectorOps
         # Minimal config for feature_net: input_dim=4, mlp_dim=feature_dim, output_dim=1
-        feature_config = ModelConfig(input_dim=4, mlp_dim=feature_dim, output_dim=1, num_heads=1, num_layers=1, dropout=0.0)
+        feature_config = ModelConfig(input_dim=4, mlp_dim=feature_dim, output_dim=1, n_heads=1, n_layers=1, dropout=0.0)
         self.feature_net = ComplexMLP(feature_config, MultivectorOps())
         # JIT compile expensive computations
         self.get_spectral_norm = torch.jit.script(self._get_spectral_norm)
@@ -184,7 +184,7 @@ class FeatureRouter(nn.Module):
         from .config import ModelConfig
         from .ops import MultivectorOps
         # Minimal config for router: input_dim=2, mlp_dim=hidden, output_dim=1
-        router_config = ModelConfig(input_dim=2, mlp_dim=self.hidden, output_dim=1, num_heads=1, num_layers=1, dropout=0.0)
+        router_config = ModelConfig(input_dim=2, mlp_dim=self.hidden, output_dim=1, n_heads=1, n_layers=1, dropout=0.0)
         self.complex_mlp = ComplexMLP(router_config, MultivectorOps())
 
     async def forward(self, mv: torch.Tensor, ops: Optional[MultivectorOps] = None) -> torch.Tensor:
@@ -408,8 +408,8 @@ class InfiniToeplitz(nn.Module):
         super().__init__()
         self.config = config
         self.ops = ops
-        self.num_heads = config.num_heads
-        self.head_dim = config.d_model // config.num_heads
+        self.num_heads = config.n_heads
+        self.head_dim = config.d_model // config.n_heads
 
         # Projection layers for Q, K, V
         self.q_proj = LinearLayer(config.d_model, config.d_model)
@@ -419,10 +419,10 @@ class InfiniToeplitz(nn.Module):
         # Initialize structured matrix parameters and gates
         self.key_params = nn.ParameterList()
         self.value_params = nn.ParameterList()
-        self.key_gate = nn.Parameter(torch.ones(config.num_heads, 1, dtype=torch.float32) * 0.5)
-        self.value_gate = nn.Parameter(torch.ones(config.num_heads, 1, dtype=torch.float32) * 0.5)
+        self.key_gate = nn.Parameter(torch.ones(config.n_heads, 1, dtype=torch.float32) * 0.5)
+        self.value_gate = nn.Parameter(torch.ones(config.n_heads, 1, dtype=torch.float32) * 0.5)
 
-        for _ in range(config.num_heads):
+        for _ in range(config.n_heads):
             # Initialize key parameters
             key_param = torch.randn(self.head_dim, dtype=torch.complex64) * 0.02
             self.key_params.append(nn.Parameter(key_param))
@@ -542,7 +542,7 @@ class TransformerLayer(nn.Module):
         self.config = config
         self.ops = ops
         embed_dim = config.d_model
-        num_heads = config.num_heads
+        num_heads = config.n_heads
         mlp_dim = config.mlp_dim
         self.attn_norm = LayerNorm(embed_dim)
         self.mlp_norm = LayerNorm(embed_dim)
@@ -576,7 +576,7 @@ class Transformer(nn.Module):
         # Transformer blocks
         self.blocks = nn.ModuleList([
             TransformerLayer(config, self.ops, concept_graph)
-            for _ in range(config.num_layers)
+            for _ in range(config.n_layers)
         ])
         
         # Output projection

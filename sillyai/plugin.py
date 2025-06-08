@@ -97,6 +97,8 @@ class PluginManager:
             'before_save': [],
             'after_load': []
         }
+        self.plugins = {}  # Store loaded plugins
+        self.model = None
         
     def initialize(self, model):
         """Initialize the plugin manager with a model reference."""
@@ -105,8 +107,92 @@ class PluginManager:
         self.mixed_precision.initialize()
         logger.info("PluginManager initialized with TensorCache and MixedPrecisionRouter")
         
+    def load_plugin(self, plugin_name: str) -> bool:
+        """Load and initialize a plugin by name.
+        
+        Args:
+            plugin_name: Name of the plugin to load
+            
+        Returns:
+            bool: True if plugin was loaded successfully, False otherwise
+        """
+        try:
+            # Check if plugin is already loaded
+            if plugin_name in self.plugins:
+                logger.info(f"Plugin {plugin_name} is already loaded")
+                return True
+                
+            # Import and instantiate plugin
+            module_name = f"sillyai.plugins.{plugin_name.lower()}"
+            try:
+                module = import_module(module_name)
+                plugin_class = getattr(module, f"{plugin_name}Plugin")
+                plugin = plugin_class()
+            except (ImportError, AttributeError) as e:
+                logger.error(f"Failed to load plugin {plugin_name}: {str(e)}")
+                return False
+                
+            # Initialize plugin with model reference
+            if self.model is not None:
+                plugin.on_init(self.model())
+                
+            # Store plugin instance
+            self.plugins[plugin_name] = plugin
+            
+            # Register plugin hooks
+            for hook_name in self.hooks.keys():
+                hook_method = getattr(plugin, hook_name, None)
+                if hook_method is not None:
+                    self.hooks[hook_name].append(hook_method)
+                    
+            logger.info(f"Successfully loaded plugin {plugin_name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error loading plugin {plugin_name}: {str(e)}")
+            return False
+            
+    def unload_plugin(self, plugin_name: str) -> bool:
+        """Unload a plugin by name.
+        
+        Args:
+            plugin_name: Name of the plugin to unload
+            
+        Returns:
+            bool: True if plugin was unloaded successfully, False otherwise
+        """
+        if plugin_name not in self.plugins:
+            logger.warning(f"Plugin {plugin_name} is not loaded")
+            return False
+            
+        try:
+            plugin = self.plugins[plugin_name]
+            
+            # Remove plugin hooks
+            for hook_name in self.hooks.keys():
+                hook_method = getattr(plugin, hook_name, None)
+                if hook_method in self.hooks[hook_name]:
+                    self.hooks[hook_name].remove(hook_method)
+                    
+            # Call plugin cleanup
+            plugin.on_unload()
+            
+            # Remove plugin instance
+            del self.plugins[plugin_name]
+            
+            logger.info(f"Successfully unloaded plugin {plugin_name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error unloading plugin {plugin_name}: {str(e)}")
+            return False
+        
     def cleanup(self):
         """Clean up resources."""
+        # Unload all plugins
+        for plugin_name in list(self.plugins.keys()):
+            self.unload_plugin(plugin_name)
+            
         self.tensor_cache.cleanup()
         self.mixed_precision.cleanup()
         logger.info("PluginManager cleaned up")

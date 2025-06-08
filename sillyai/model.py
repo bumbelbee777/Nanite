@@ -1,117 +1,161 @@
 import torch
 import torch.nn as nn
-import torch.functional as F
-from typing import Optional, Dict, List, Union, Any
-import weakref
+import torch.nn.functional as F
+import numpy as np
+from typing import Dict, List, Optional, Set, Tuple, Union
+import logging
+import os
+import json
+from datetime import datetime
 
-from .config import ModelConfig
 from .core import Transformer
-from .concept import ConceptGraph
-from .plugin import PluginManager
+from .config import ModelConfig, Modality, PrecisionLevel
 from .ops import MultivectorOps
+from .plugin import SillyPlugin
 
 class SillyAI(nn.Module):
-    """Main SillyAI model interface combining transformer, concept graph, and plugins."""
+    """Exported SillyAI class for interfacing with the model."""
     
     def __init__(self, config: ModelConfig, ops: Optional[MultivectorOps] = None):
         super().__init__()
         self.config = config
+        self.ops = ops or MultivectorOps()
         self.device = torch.device(config.device)
         
-        # Initialize core components
-        self.ops = ops or MultivectorOps().compile()
-        self.concept_graph = ConceptGraph(max_size=config.concept_graph_size, decay_rate=0.1)
-        self.transformer = Transformer(config, self.ops, self.concept_graph)
+        # Initialize logging
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.INFO)
         
-        # Plugin system
-        self.plugin_manager = PluginManager()
-        for plugin_name in config.enabled_plugins:
-            self.plugin_manager.load_plugin(plugin_name)
-            
-        # Training components
-        self.optimizer = torch.optim.AdamW(
-            self.parameters(),
-            lr=config.learning_rate,
-            weight_decay=config.weight_decay
-        )
-        self.scaler = torch.amp.GradScaler(device=self.device)
+        # Create log directory if it doesn't exist
+        os.makedirs('logs', exist_ok=True)
+        
+        # Add file handler
+        fh = logging.FileHandler(f'logs/sillyai_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+        fh.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        fh.setFormatter(formatter)
+        self.logger.addHandler(fh)
+        
+        # Initialize the core Transformer model
+        self.transformer = Transformer(config, self.ops)
+        
+        # Initialize plugins
+        self.plugins: Dict[str, SillyPlugin] = {}
+        self._load_plugins()
         
         # Move model to device
         self.to(self.device)
         
+    def _load_plugins(self):
+        """Load enabled plugins."""
+        for plugin_name in self.config.enabled_plugins:
+            try:
+                if plugin_name == 'trainer':
+                    from sillyai.plugins.trainer import SillyAITrainerPlugin
+                    self.plugins['trainer'] = SillyAITrainerPlugin(self.config)
+                elif plugin_name == 'visualizer':
+                    from sillyai.plugins.visualizer import SillyAIVisualizerPlugin
+                    self.plugins['visualizer'] = SillyAIVisualizerPlugin()
+                # Add more plugins here as needed
+                
+                # Initialize plugin
+                plugin = self.plugins[plugin_name]
+                plugin.on_init(self)
+                self.logger.info(f"Loaded plugin: {plugin_name}")
+            except Exception as e:
+                self.logger.error(f"Failed to load plugin {plugin_name}: {str(e)}")
+                
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Forward pass through the model."""
-        # Plugin hook: before_forward
-        x = self.plugin_manager.call_hook('before_forward', x)
-        
-        # Main forward pass
+        # Notify plugins before forward pass
+        for plugin in self.plugins.values():
+            plugin.before_forward(x)
+            
+        # Forward through transformer
         output = self.transformer(x, mask)
         
-        # Plugin hook: after_forward
-        output = self.plugin_manager.call_hook('after_forward', output)
-        
+        # Notify plugins after forward pass
+        for plugin in self.plugins.values():
+            plugin.after_forward(output)
+            
         return output
         
-    def train_step(self, x: torch.Tensor, y: torch.Tensor, mask: Optional[torch.Tensor] = None) -> float:
-        """Single training step with mixed precision."""
-        self.optimizer.zero_grad()
-        
-        # Forward pass with mixed precision
-        with torch.cuda.amp.autocast():
-            output = self(x, mask)
-            loss = F.mse_loss(output, y)
-            
-        # Backward pass with gradient scaling
-        self.scaler.scale(loss).backward()
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-        
-        return loss.item()
-        
-    def update_concept_graph(self, concepts: List[Dict[str, Any]]):
-        """Update the concept graph with new concepts."""
-        for concept in concepts:
-            self.concept_graph.add_concept(**concept)
-            
     def save(self, path: str):
-        """Save model state."""
-        state = {
-            'model_state': self.state_dict(),
+        """Save model state and plugins."""
+        # Save model state
+        torch.save({
+            'model_state_dict': self.state_dict(),
             'config': self.config,
-            'concept_graph': self.concept_graph,
-            'plugin_states': self.plugin_manager.get_states()
-        }
-        torch.save(state, path)
+            'transformer_state_dict': self.transformer.state_dict()
+        }, path)
+        
+        # Save plugin states
+        for name, plugin in self.plugins.items():
+            plugin.on_save(path)
+            
+        self.logger.info(f"Saved model to {path}")
         
     def load(self, path: str):
-        """Load model state."""
-        state = torch.load(path, map_location=self.device)
-        self.load_state_dict(state['model_state'])
-        self.concept_graph = state['concept_graph']
-        self.plugin_manager.load_states(state['plugin_states'])
+        """Load model state and plugins."""
+        # Load model state
+        checkpoint = torch.load(path)
+        self.load_state_dict(checkpoint['model_state_dict'])
+        self.transformer.load_state_dict(checkpoint['transformer_state_dict'])
         
-    def generate_bytecode(self, start_concept: Optional[str] = None, max_hops: int = 5) -> List[tuple]:
-        """Generate bytecode from concept graph."""
-        return self.concept_graph.to_bytecode(start_concept, max_hops)
-        
-    def get_concept_graph(self) -> ConceptGraph:
-        """Get the current concept graph."""
-        return self.concept_graph
+        # Load plugin states
+        for name, plugin in self.plugins.items():
+            plugin.on_load(path)
+            
+        self.logger.info(f"Loaded model from {path}")
         
     def print_concepts(self, top_k: int = 10):
-        """Print top concepts by centrality."""
-        concepts = self.concept_graph.get_top_concepts(top_k)
-        print("\nTop concepts by centrality:")
-        for name, score in concepts:
-            print(f"  {name}: {score:.3f}")
+        """Print top concepts from the concept graph."""
+        if not hasattr(self.transformer, 'concept_graph') or not self.transformer.concept_graph:
+            self.logger.warning("Concept graph is empty")
+            return
             
-    def optimize_for_cpu(self):
-        """Optimize model for CPU inference."""
-        torch.set_num_threads(max(1, torch.get_num_threads() // 2))
-        torch.set_num_interop_threads(1)
+        # Sort concepts by frequency
+        sorted_concepts = sorted(
+            self.transformer.concept_graph.items(),
+            key=lambda x: x[1]['frequency'],
+            reverse=True
+        )
         
-    def optimize_for_low_memory(self):
-        """Enable memory optimizations."""
-        for module in self.modules():
-            if hasattr(module, 'gradient_checkpointing'):
-                module.gradient_checkpointing = True 
+        # Print top k concepts
+        self.logger.info(f"Top {top_k} concepts:")
+        for i, (concept, data) in enumerate(sorted_concepts[:top_k]):
+            self.logger.info(f"{i+1}. {concept}: {data['frequency']} occurrences")
+            
+    def generate_bytecode(self) -> List[Tuple[str, List[float]]]:
+        """Generate bytecode from concept graph."""
+        bytecode = []
+        
+        if not hasattr(self.transformer, 'concept_graph') or not self.transformer.concept_graph:
+            return bytecode
+            
+        # Sort concepts by frequency
+        sorted_concepts = sorted(
+            self.transformer.concept_graph.items(),
+            key=lambda x: x[1]['frequency'],
+            reverse=True
+        )
+        
+        # Generate bytecode for top concepts
+        for concept, data in sorted_concepts:
+            # Get concept embedding
+            embedding = self.transformer.concept_embeddings[data['id']].detach().cpu().numpy()
+            
+            # Add to bytecode
+            bytecode.append((concept, embedding.tolist()))
+            
+        return bytecode
+
+    @property
+    def concept_graph(self):
+        """Access the concept graph from the transformer."""
+        return getattr(self.transformer, 'concept_graph', {})
+        
+    @concept_graph.setter
+    def concept_graph(self, value):
+        """Set the concept graph in the transformer."""
+        self.transformer.concept_graph = value 

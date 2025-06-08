@@ -1,18 +1,102 @@
-# SillyAI
+# 🎮 SillyAI - Quantum Wavefunction Learning
 
-SillyAI is an advanced transformer model that leverages mixed precision quantization for efficient deep learning. By dynamically adapting precision levels based on tensor properties, SillyAI achieves optimal performance while maintaining accuracy. The architecture enables it to encode both high-precision and low-precision information, making it particularly well-suited for tasks involving signal processing, physics simulations, and other domains where numerical precision is important.
+<div align="center">
 
-SillyAI introduces innovative features like concept graphing, enabling it to visualize and understand the relationships between concepts with a weighting mechanism based on energy values. This graph dynamically updates through an LFU algorithm, thereby improving its reasoning capabilities over time.
+*A quantum-inspired transformer model for general-purpose use cases*
 
-To allow for more efficient and optimized reasoning and problem-solving, SillyAI uses the SILLY custom ISA to build high-level assembler corresponding to proofs or in general, steps to solving problems in a reliable manner.
+</div>
 
-Finally, SillyAI's architecture is highly minimalistic and modular, allowing for features to be turned on and off easily and nicely. It can also be extended thanks to its plugin system which allows for dynamic loading/unloading on demand.
+## 🌟 Overview
 
-## Key Features
+SillyAI is an advanced transformer model that combines quantum computing principles with modern deep learning techniques. It specializes in learning and predicting quantum wavefunctions, making it particularly powerful for physics simulations and quantum system analysis.
 
-- Mixed Precision Quantization: Dynamically adapts precision levels (TERNARY, INT4, FP4, FP8, FP16) based on tensor properties
-- Concept Graph: Visualizes and manages relationships between concepts with energy-based weighting
-- SILLY ISA: Custom instruction set for formalizing proofs and problem-solving steps
-- Plugin System: Extensible architecture with dynamic plugin loading/unloading
-- Memory Efficient: Optimized for both CPU and GPU with low memory footprint
-- JIT Compilation: Supports TorchScript compilation for improved performance
+<div align="center">
+  <img src="media/wavefunction_evolution.gif" alt="Wavefunction Evolution" width="600"/>
+  <br>
+  <em>Real-time visualization of wavefunction evolution during training</em>
+</div>
+
+## 🚀 Key Features
+
+### 🎯 Mixed Precision Architecture
+- Dynamic precision adaptation (Ternary, INT4, FP4, FP8, FP16)
+- Optimized for both CPU and GPU execution
+- Memory-efficient tensor operations
+- JIT compilation support
+
+### 🧠 Concept Graph System
+- Dynamic concept relationship visualization
+- Energy-based weighting mechanism
+- LFU-based graph updates
+- Real-time concept evolution tracking
+
+### 🔌 Plugin System
+- Dynamic plugin loading/unloading
+- Extensible architecture
+- Built-in visualization tools
+- Custom training pipelines
+
+### 📊 Visualization Tools
+- Real-time wavefunction plotting
+- Resource usage monitoring
+- Training progress tracking
+- Concept graph visualization
+
+## 🛠️ Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/bumbelbee777/sillyai.git
+cd sillyai
+
+# Create a virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+## 🎮 Quick Start
+
+```python
+from sillyai import SillyAI, ModelConfig
+from sillyai.ops import MultivectorOps
+
+# Initialize configuration
+config = ModelConfig(
+    d_model=64,
+    n_heads=4,
+    n_layers=2,
+    max_seq_len=64
+)
+
+# Create model
+model = SillyAI(config, ops=MultivectorOps().compile())
+
+# Train the model
+model.train()
+```
+
+## 🎯 Some Use Cases
+
+- Quantum system simulation
+- Wavefunction prediction
+- Physics-based learning
+- Signal processing
+- Complex system modeling
+- Equation solving
+- NLP
+
+## 🤝 Contributing
+
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+
+## 📝 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- PyTorch team for the amazing deep learning framework
+- Google's InfiniContext paper for the attention layer inspiration

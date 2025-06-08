@@ -8,7 +8,7 @@ from collections import deque
 import sys
 from datetime import datetime
 from threading import Lock
-from typing import Union, List, Tuple
+from typing import Union, List, Tuple, Dict, Optional
 import bisect
 
 from datasets import Dataset
@@ -16,14 +16,19 @@ from datasets import Dataset
 import torch
 from torch.utils.data import IterableDataset
 import numpy as np
+import mmap
+import json
+import logging
+import traceback
+import inspect
 
 # ANSI color codes for Windows/Unix
 BLUE = '\033[94m'
 YELLOW = '\033[93m'
 RED = '\033[91m'
 RESET = '\033[0m'
-CACHE_DIR = "cache_chunks"
-CHUNK_SIZE = 1_000   # windows per chunk
+CACHE_DIR = "cache"
+CHUNK_SIZE = 1000   # windows per chunk
 NPZ_EXT    = ".npz"
 
 
@@ -504,38 +509,181 @@ class IterableMMapDataset(IterableDataset):
         self.close()
 
 class Logger:
+    """Enhanced logger for tracking tensor pipeline and model state."""
+    
     def __init__(self, logfile='debug.log'):
         self.logfile = logfile
-        self.lock = Lock()
-
+        self.logger = logging.getLogger('SillyAI')
+        self.logger.setLevel(logging.DEBUG)
+        
+        # File handler with custom formatter
+        fh = logging.FileHandler(logfile)
+        fh.setLevel(logging.DEBUG)
+        
+        # Custom formatter for detailed logging
+        formatter = logging.Formatter('(%(asctime)s) [%(module)s.%(class)s::%(funcName)s()] %(message)s')
+        fh.setFormatter(formatter)
+        
+        self.logger.addHandler(fh)
+        
+        # Console handler for immediate feedback
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.INFO)
+        ch.setFormatter(formatter)
+        self.logger.addHandler(ch)
+        
+        # Track tensor operations
+        self.tensor_ops = {}
+        self.model_states = {}
+        
     def clear_log(self):
-        """Overwrite the log file (clear contents)."""
-        with self.lock:
-            with open(self.logfile, 'w', encoding='utf-8') as f:
-                f.write('')
+        """Clear the log file."""
+        with open(self.logfile, 'w') as f:
+            f.write('')
+            
+    def _write(self, msg, level='info'):
+        """Write message to log with proper formatting."""
+        # Get caller information
+        frame = inspect.currentframe().f_back
+        module_name = frame.f_globals['__name__']
+        class_name = frame.f_locals.get('self', None).__class__.__name__ if 'self' in frame.f_locals else 'Module'
+        method_name = frame.f_code.co_name
+        
+        # Add class and method context to logger
+        extra = {
+            'module': module_name,
+            'class': class_name,
+            'funcName': method_name
+        }
+        
+        # Log with appropriate level
+        if level == 'debug':
+            self.logger.debug(msg, extra=extra)
+        elif level == 'info':
+            self.logger.info(msg, extra=extra)
+        elif level == 'warning':
+            self.logger.warning(msg, extra=extra)
+        elif level == 'error':
+            self.logger.error(msg, extra=extra)
+            
+    def _get_tensor_stats(self, tensor):
+        """Get statistics for a tensor, handling complex numbers."""
+        if tensor.is_complex():
+            # For complex tensors, get stats for magnitude
+            magnitude = torch.abs(tensor)
+            return {
+                'shape': list(tensor.shape),
+                'dtype': str(tensor.dtype),
+                'device': str(tensor.device),
+                'requires_grad': tensor.requires_grad,
+                'mean_magnitude': magnitude.mean().item(),
+                'std_magnitude': magnitude.std().item(),
+                'max_magnitude': magnitude.max().item(),
+                'min_magnitude': magnitude.min().item(),
+                'is_complex': True
+            }
+        else:
+            # For real tensors, get normal stats
+            return {
+                'shape': list(tensor.shape),
+                'dtype': str(tensor.dtype),
+                'device': str(tensor.device),
+                'requires_grad': tensor.requires_grad,
+                'mean': tensor.mean().item(),
+                'std': tensor.std().item(),
+                'max': tensor.max().item(),
+                'min': tensor.min().item(),
+                'is_complex': False
+            }
+            
+    def log_tensor_op(self, tensor: torch.Tensor, op_name: str, **kwargs):
+        """Log tensor operation with statistics."""
+        tensor_id = id(tensor)
+        stats = self._get_tensor_stats(tensor)
+        
+        # Add operation info
+        stats.update({
+            'op_name': op_name,
+            'timestamp': datetime.now().isoformat(),
+            **kwargs
+        })
+        
+        # Store in history
+        if tensor_id not in self.tensor_ops:
+            self.tensor_ops[tensor_id] = []
+        self.tensor_ops[tensor_id].append(stats)
+        
+        # Log operation
+        self._write(f"Tensor operation: {op_name} - {stats}")
+        
+    def log_model_state(self, model: torch.nn.Module, state_name: str, **kwargs):
+        """Log model state with parameter statistics."""
+        model_id = id(model)
+        state = {
+            'state_name': state_name,
+            'timestamp': datetime.now().isoformat(),
+            'parameters': {}
+        }
+        
+        # Get statistics for each parameter
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                state['parameters'][name] = self._get_tensor_stats(param)
+                
+        # Store in history
+        if model_id not in self.model_states:
+            self.model_states[model_id] = []
+        self.model_states[model_id].append(state)
+        
+        # Log state
+        self._write(f"Model state: {state_name} - {len(state['parameters'])} parameters")
+        
+    def log_forward_pass(self, module: torch.nn.Module, input: torch.Tensor, output: torch.Tensor):
+        """Log forward pass through a module."""
+        self.log_tensor_op(input, f"{module.__class__.__name__}.forward.input")
+        self.log_tensor_op(output, f"{module.__class__.__name__}.forward.output")
+        
+    def log_backward_pass(self, module: torch.nn.Module, grad_input: torch.Tensor, grad_output: torch.Tensor):
+        """Log backward pass through a module."""
+        self.log_tensor_op(grad_input, f"{module.__class__.__name__}.backward.grad_input")
+        self.log_tensor_op(grad_output, f"{module.__class__.__name__}.backward.grad_output")
+        
+    def log_optimizer_step(self, optimizer: torch.optim.Optimizer, loss: torch.Tensor):
+        """Log optimizer step."""
+        self.log_tensor_op(loss, f"{optimizer.__class__.__name__}.step.loss")
+        
+    def log_concept_graph(self, graph, operation: str):
+        """Log concept graph operation."""
+        self._write(f"Concept graph operation: {operation}")
+        
+    def get_tensor_history(self, tensor_id: int) -> List[Dict]:
+        """Get operation history for a tensor."""
+        return self.tensor_ops.get(tensor_id, [])
+        
+    def get_model_history(self, model_id: int) -> List[Dict]:
+        """Get state history for a model."""
+        return self.model_states.get(model_id, [])
+        
+    def export_log(self, path: str):
+        """Export log to JSON file."""
+        import json
+        data = {
+            'tensor_ops': self.tensor_ops,
+            'model_states': self.model_states
+        }
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=2)
 
-    def _write(self, msg):
-        with self.lock:
-            with open(self.logfile, 'a', encoding='utf-8') as f:
-                f.write(msg + '\n')
+# Create global logger instance
+logger = Logger()
 
-    def log(self, component, method, msg, level='info'):
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        prefix = f'({timestamp}) [{component}::{method}]'
-        color = {'info': BLUE, 'warning': YELLOW, 'error': RED}.get(level, '')
-        reset = RESET if color else ''
-        formatted = f'{prefix} {msg}'
-        # Print colored to console
-        print(f'{color}{formatted}{reset}', file=sys.stderr if level=='error' else sys.stdout)
-        # Write plain to log file
-        self._write(formatted)
+def log_tensor(tensor: torch.Tensor, op_name: str, **kwargs):
+    """Convenience function for logging tensor operations."""
+    logger.log_tensor_op(tensor, op_name, **kwargs)
 
-    def info(self, component, method, msg):
-        self.log(component, method, msg, 'info')
-    def warning(self, component, method, msg):
-        self.log(component, method, msg, 'warning')
-    def error(self, component, method, msg):
-        self.log(component, method, msg, 'error')
+def log_model(model: torch.nn.Module, state_name: str, **kwargs):
+    """Convenience function for logging model states."""
+    logger.log_model_state(model, state_name, **kwargs)
 
 def log_tensor(tensor, op_name, component="TensorOp", method=""): 
     """Log tensor operation, shape, dtype, and device."""
@@ -545,5 +693,3 @@ def log_tensor(tensor, op_name, component="TensorOp", method=""):
         for i, t in enumerate(tensor):
             if isinstance(t, torch.Tensor):
                 logger.info(component, method or op_name, f"{op_name}[{i}]: shape={tuple(t.shape)}, dtype={t.dtype}, device={t.device}")
-
-logger = Logger()

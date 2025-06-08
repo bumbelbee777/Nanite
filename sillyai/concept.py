@@ -2,10 +2,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from collections import deque, defaultdict
 from typing import Optional, Dict, Set, List, Tuple, Any
-import random, logging, copy
+import logging
 import torch
 import networkx as nx
-import numpy as np
+
+from .complex_tokens import ComplexBasisSet
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +30,16 @@ class Concept:
     access_count: int = 0
     last_access_time: int = 0
     regions: Set[str] = field(default_factory=set)
+    # New fields for complex periodic function representation
+    basis_weights: Optional[torch.Tensor] = None  # Weights for basis functions
+    composition_weights: Dict[str, float] = field(default_factory=dict)  # Weights for composed concepts
+    frequency: float = 1.0  # Base frequency for periodic function
+    phase: float = 0.0  # Phase offset for periodic function
 
 class ConceptGraph:
     """Manages a graph of concepts and their relationships."""
     
-    def __init__(self, max_size: int = 1000, decay_rate: float = 0.1):
+    def __init__(self, max_size: int = 1000, decay_rate: float = 0.1, num_basis: int = 32):
         self.graph = nx.DiGraph()
         self.max_size = max_size
         self.concept_embeddings = {}
@@ -41,9 +47,16 @@ class ConceptGraph:
         self.time = 0
         self.regions = {}
         self.region_meta = {}
+        self.num_basis = num_basis
+        self.basis_set = ComplexBasisSet(num_basis)
         
     def add_concept(self, name: str, embedding: Optional[torch.Tensor] = None, 
-                   relationships: Optional[Dict[str, float]] = None, **meta):
+                   relationships: Optional[Dict[str, float]] = None, 
+                   basis_weights: Optional[torch.Tensor] = None,
+                   composition: Optional[Dict[str, float]] = None,
+                   frequency: float = 1.0,
+                   phase: float = 0.0,
+                   **meta):
         """Add a concept to the graph with optional embedding and relationships."""
         if len(self.graph) >= self.max_size:
             # Remove least central concept if at capacity
@@ -52,8 +65,19 @@ class ConceptGraph:
             self.graph.remove_node(least_central)
             del self.concept_embeddings[least_central]
             
+        # Create concept with complex periodic function representation
+        concept = Concept(
+            name=name,
+            embedding=embedding,
+            basis_weights=basis_weights,
+            composition_weights=composition or {},
+            frequency=frequency,
+            phase=phase,
+            **meta
+        )
+            
         # Add concept node
-        self.graph.add_node(name, **meta)
+        self.graph.add_node(name, concept=concept)
         if embedding is not None:
             self.concept_embeddings[name] = embedding
             
@@ -63,8 +87,48 @@ class ConceptGraph:
                 if target in self.graph:
                     self.graph.add_edge(name, target, weight=weight)
                     
+    def compose_concept(self, name: str, components: Dict[str, float], 
+                       frequency: float = 1.0, phase: float = 0.0) -> Concept:
+        """Compose a new concept from existing concepts with weights."""
+        if not all(comp in self.graph for comp in components):
+            raise ValueError("All component concepts must exist in the graph")
+            
+        # Get component concepts
+        comp_concepts = [self.graph.nodes[comp]['concept'] for comp in components]
+        
+        # Combine basis weights
+        basis_weights = torch.zeros(self.num_basis, dtype=torch.complex64)
+        for comp, weight in zip(comp_concepts, components.values()):
+            if comp.basis_weights is not None:
+                basis_weights += weight * comp.basis_weights
+                
+        # Create new concept
+        concept = Concept(
+            name=name,
+            basis_weights=basis_weights,
+            composition_weights=components,
+            frequency=frequency,
+            phase=phase
+        )
+        
+        # Add to graph
+        self.add_concept(name, basis_weights=basis_weights, 
+                        composition=components, frequency=frequency, phase=phase)
+        
+        return concept
+        
     def get_concept_embedding(self, name: str) -> Optional[torch.Tensor]:
         """Get the embedding for a concept."""
+        if name not in self.graph:
+            return None
+            
+        concept = self.graph.nodes[name]['concept']
+        if concept.basis_weights is not None:
+            # Generate complex periodic function representation
+            x = torch.linspace(0, 1, 100)  # Sample points
+            basis_funcs = self.basis_set(x)
+            return torch.einsum('n,nk->k', concept.basis_weights, basis_funcs)
+            
         return self.concept_embeddings.get(name)
         
     def get_related_concepts(self, name: str, top_k: int = 5) -> List[Tuple[str, float]]:
@@ -86,7 +150,7 @@ class ConceptGraph:
         decay = self.decay_rate
         new_e = {n: 0.0 for n in self.graph.nodes()}
         for n in self.graph.nodes():
-            e = self.graph.nodes[n].get('energy', 0.0)
+            e = self.graph.nodes[n]['concept'].energy
             if e <= 0.0:
                 continue
             retained = e * decay
@@ -102,13 +166,13 @@ class ConceptGraph:
                     for _, target, data in edges:
                         new_e[target] += data['weight'] * factor
         for n, e in new_e.items():
-            self.graph.nodes[n]['energy'] = e
+            self.graph.nodes[n]['concept'].energy = e
             
     def decay(self):
         """Apply global decay to all concepts."""
         r = self.decay_rate
         for n in self.graph.nodes():
-            self.graph.nodes[n]['energy'] *= r
+            self.graph.nodes[n]['concept'].energy *= r
         self.time += 1
         return self.time
         
@@ -116,9 +180,9 @@ class ConceptGraph:
         """Prune concepts below energy and access thresholds."""
         to_remove = []
         for n in self.graph.nodes():
-            node_data = self.graph.nodes[n]
-            if (node_data.get('energy', 0.0) < energy_thresh and 
-                node_data.get('access_count', 0) < access_thresh):
+            node_data = self.graph.nodes[n]['concept']
+            if (node_data.energy < energy_thresh and 
+                node_data.access_count < access_thresh):
                 to_remove.append(n)
         for n in to_remove:
             self.graph.remove_node(n)
@@ -137,9 +201,9 @@ class ConceptGraph:
             raise KeyError(f"Concept {concept_name!r} not found")
         self.define_region(region_name)
         self.regions[region_name].add(concept_name)
-        if 'regions' not in self.graph.nodes[concept_name]:
-            self.graph.nodes[concept_name]['regions'] = set()
-        self.graph.nodes[concept_name]['regions'].add(region_name)
+        if 'regions' not in self.graph.nodes[concept_name]['concept'].regions:
+            self.graph.nodes[concept_name]['concept'].regions = set()
+        self.graph.nodes[concept_name]['concept'].regions.add(region_name)
         
     def get_region(self, region_name: str) -> Optional[Set[str]]:
         """Get all concepts in a region."""
@@ -163,7 +227,22 @@ class ConceptGraph:
                 return
                 
             visited.add(node)
+            concept = self.graph.nodes[node]['concept']
+            
+            # Add concept definition
             bytecode.append(('CONCEPT', node))
+            
+            # Add basis weights if present
+            if concept.basis_weights is not None:
+                bytecode.append(('BASIS_WEIGHTS', concept.basis_weights.tolist()))
+                
+            # Add composition weights if present
+            if concept.composition_weights:
+                bytecode.append(('COMPOSE', concept.composition_weights))
+                
+            # Add frequency and phase
+            bytecode.append(('FREQUENCY', concept.frequency))
+            bytecode.append(('PHASE', concept.phase))
             
             # Add relationships as operations
             for target, data in self.graph.edges(node, data=True):
@@ -178,7 +257,7 @@ class ConceptGraph:
         """Update concept embeddings."""
         for name, embedding in embeddings.items():
             if name in self.graph:
-                self.concept_embeddings[name] = embedding
+                self.graph.nodes[name]['concept'].embedding = embedding
                 
     def get_subgraph(self, concepts: List[str]) -> nx.DiGraph:
         """Get subgraph containing only specified concepts."""
@@ -188,16 +267,19 @@ class ConceptGraph:
         """Merge another concept graph into this one."""
         for node in other.graph.nodes():
             if len(self.graph) < self.max_size:
-                self.add_concept(node, **other.graph.nodes[node])
+                concept = other.graph.nodes[node]['concept']
+                self.add_concept(
+                    name=node,
+                    embedding=concept.embedding,
+                    basis_weights=concept.basis_weights,
+                    composition=concept.composition_weights,
+                    frequency=concept.frequency,
+                    phase=concept.phase
+                )
                 
         for u, v, data in other.graph.edges(data=True):
             if u in self.graph and v in self.graph:
                 self.graph.add_edge(u, v, weight=data['weight'])
-                
-        # Merge embeddings
-        for name, embedding in other.concept_embeddings.items():
-            if name in self.graph:
-                self.concept_embeddings[name] = embedding
                 
     def save(self, path: str):
         """Save concept graph to file."""
@@ -208,7 +290,8 @@ class ConceptGraph:
             'decay_rate': self.decay_rate,
             'time': self.time,
             'regions': self.regions,
-            'region_meta': self.region_meta
+            'region_meta': self.region_meta,
+            'num_basis': self.num_basis
         }
         torch.save(state, path)
         
@@ -222,3 +305,5 @@ class ConceptGraph:
         self.time = state['time']
         self.regions = state['regions']
         self.region_meta = state['region_meta']
+        self.num_basis = state['num_basis']
+        self.basis_set = ComplexBasisSet(self.num_basis)
