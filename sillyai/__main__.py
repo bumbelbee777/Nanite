@@ -19,68 +19,267 @@ from .plugins.dynamic_learning_rate import DynamicLearningRate
 
 class SchrödingerDataset(Dataset):
     def __init__(self, seq_len=64, potential_type='harmonic', num_samples=1000, 
-                 difficulty_level=1, max_difficulty=3):
+                 difficulty_level=1, max_difficulty=5, dimensions=1, time_dependent=False):
         self.seq_len = seq_len
         self.potential_type = potential_type
         self.num_samples = num_samples
         self.difficulty_level = difficulty_level
         self.max_difficulty = max_difficulty
-        self.x = np.linspace(-1, 1, seq_len)
+        self.dimensions = dimensions
+        self.time_dependent = time_dependent
+        
+        # Create spatial grid
+        if dimensions == 1:
+            self.x = np.linspace(-1, 1, seq_len)
+        elif dimensions == 2:
+            x = np.linspace(-1, 1, int(np.sqrt(seq_len)))
+            y = np.linspace(-1, 1, int(np.sqrt(seq_len)))
+            self.x, self.y = np.meshgrid(x, y)
+        else:  # 3D
+            x = np.linspace(-1, 1, int(np.cbrt(seq_len)))
+            y = np.linspace(-1, 1, int(np.cbrt(seq_len)))
+            z = np.linspace(-1, 1, int(np.cbrt(seq_len)))
+            self.x, self.y, self.z = np.meshgrid(x, y, z)
+            
+        # Create time grid if time-dependent
+        if time_dependent:
+            self.t = np.linspace(0, 1, seq_len)
 
     def __len__(self):
         return self.num_samples
 
     def _make_sample(self):
         if self.potential_type == 'harmonic':
-            # Adjust potential strength based on difficulty
+            # Base potential strength increases with difficulty
             k_min = 1.0 + (self.difficulty_level - 1) * 2.0
             k_max = 3.0 + (self.difficulty_level - 1) * 2.0
             k = np.random.uniform(k_min, k_max)
-            V = 0.5 * k * self.x**2
+            
+            if self.dimensions == 1:
+                V = 0.5 * k * self.x**2
+                if self.time_dependent:
+                    # Add time-dependent perturbation
+                    omega = 2.0 + (self.difficulty_level - 1)
+                    V = V + 0.1 * np.sin(omega * self.t)[:, None] * np.exp(-self.x**2)
+            elif self.dimensions == 2:
+                V = 0.5 * k * (self.x**2 + self.y**2)
+                if self.time_dependent:
+                    omega = 2.0 + (self.difficulty_level - 1)
+                    V = V + 0.1 * np.sin(omega * self.t)[:, None, None] * np.exp(-(self.x**2 + self.y**2))
+            else:  # 3D
+                V = 0.5 * k * (self.x**2 + self.y**2 + self.z**2)
+                if self.time_dependent:
+                    omega = 2.0 + (self.difficulty_level - 1)
+                    V = V + 0.1 * np.sin(omega * self.t)[:, None, None, None] * np.exp(-(self.x**2 + self.y**2 + self.z**2))
             
             # Add complexity based on difficulty level
             if self.difficulty_level > 1:
                 # Add small perturbations
-                perturbation = 0.1 * (self.difficulty_level - 1) * np.sin(5 * self.x)
-                V += perturbation
+                if self.dimensions == 1:
+                    perturbation = 0.1 * (self.difficulty_level - 1) * np.sin(5 * self.x)
+                    V += perturbation
+                elif self.dimensions == 2:
+                    perturbation = 0.1 * (self.difficulty_level - 1) * (np.sin(5 * self.x) + np.sin(5 * self.y))
+                    V += perturbation
+                else:  # 3D
+                    perturbation = 0.1 * (self.difficulty_level - 1) * (np.sin(5 * self.x) + np.sin(5 * self.y) + np.sin(5 * self.z))
+                    V += perturbation
                 
             if self.difficulty_level > 2:
                 # Add multiple wells
-                V += 0.2 * np.exp(-10 * (self.x - 0.5)**2) + 0.2 * np.exp(-10 * (self.x + 0.5)**2)
+                if self.dimensions == 1:
+                    V += 0.2 * np.exp(-10 * (self.x - 0.5)**2) + 0.2 * np.exp(-10 * (self.x + 0.5)**2)
+                elif self.dimensions == 2:
+                    V += 0.2 * (np.exp(-10 * ((self.x - 0.5)**2 + (self.y - 0.5)**2)) + 
+                               np.exp(-10 * ((self.x + 0.5)**2 + (self.y + 0.5)**2)))
+                else:  # 3D
+                    V += 0.2 * (np.exp(-10 * ((self.x - 0.5)**2 + (self.y - 0.5)**2 + (self.z - 0.5)**2)) + 
+                               np.exp(-10 * ((self.x + 0.5)**2 + (self.y + 0.5)**2 + (self.z + 0.5)**2)))
+            
+            if self.difficulty_level > 3:
+                # Add random potential barriers
+                if self.dimensions == 1:
+                    num_barriers = self.difficulty_level - 2
+                    for _ in range(num_barriers):
+                        pos = np.random.uniform(-0.8, 0.8)
+                        width = np.random.uniform(0.1, 0.3)
+                        height = np.random.uniform(0.5, 2.0)
+                        V += height * np.exp(-(self.x - pos)**2 / (2 * width**2))
+                elif self.dimensions == 2:
+                    num_barriers = self.difficulty_level - 2
+                    for _ in range(num_barriers):
+                        pos_x = np.random.uniform(-0.8, 0.8)
+                        pos_y = np.random.uniform(-0.8, 0.8)
+                        width = np.random.uniform(0.1, 0.3)
+                        height = np.random.uniform(0.5, 2.0)
+                        V += height * np.exp(-((self.x - pos_x)**2 + (self.y - pos_y)**2) / (2 * width**2))
+                else:  # 3D
+                    num_barriers = self.difficulty_level - 2
+                    for _ in range(num_barriers):
+                        pos_x = np.random.uniform(-0.8, 0.8)
+                        pos_y = np.random.uniform(-0.8, 0.8)
+                        pos_z = np.random.uniform(-0.8, 0.8)
+                        width = np.random.uniform(0.1, 0.3)
+                        height = np.random.uniform(0.5, 2.0)
+                        V += height * np.exp(-((self.x - pos_x)**2 + (self.y - pos_y)**2 + (self.z - pos_z)**2) / (2 * width**2))
+            
+            if self.difficulty_level > 4:
+                # Add periodic potential
+                if self.dimensions == 1:
+                    V += 0.5 * np.cos(2 * np.pi * self.x * self.difficulty_level)
+                elif self.dimensions == 2:
+                    V += 0.5 * (np.cos(2 * np.pi * self.x * self.difficulty_level) + 
+                               np.cos(2 * np.pi * self.y * self.difficulty_level))
+                else:  # 3D
+                    V += 0.5 * (np.cos(2 * np.pi * self.x * self.difficulty_level) + 
+                               np.cos(2 * np.pi * self.y * self.difficulty_level) +
+                               np.cos(2 * np.pi * self.z * self.difficulty_level))
             
             # Generate wavefunction
-            if self.difficulty_level == 1:
-                # Simple ground state
-                psi = np.exp(-np.sqrt(k) * self.x**2/2)
-            elif self.difficulty_level == 2:
-                # Mix of ground and first excited state
-                psi = 0.8 * np.exp(-np.sqrt(k) * self.x**2/2) + 0.2 * self.x * np.exp(-np.sqrt(k) * self.x**2/2)
-            else:
-                # Complex superposition
-                psi = (0.6 * np.exp(-np.sqrt(k) * self.x**2/2) + 
-                      0.3 * self.x * np.exp(-np.sqrt(k) * self.x**2/2) +
-                      0.1 * (2 * self.x**2 - 1) * np.exp(-np.sqrt(k) * self.x**2/2))
+            if self.dimensions == 1:
+                if self.difficulty_level == 1:
+                    # Simple ground state
+                    psi = np.exp(-np.sqrt(k) * self.x**2/2)
+                elif self.difficulty_level == 2:
+                    # Mix of ground and first excited state
+                    psi = 0.8 * np.exp(-np.sqrt(k) * self.x**2/2) + 0.2 * self.x * np.exp(-np.sqrt(k) * self.x**2/2)
+                else:
+                    # Complex superposition
+                    psi = (0.6 * np.exp(-np.sqrt(k) * self.x**2/2) + 
+                          0.3 * self.x * np.exp(-np.sqrt(k) * self.x**2/2) +
+                          0.1 * (2 * self.x**2 - 1) * np.exp(-np.sqrt(k) * self.x**2/2))
+                    
+                if self.time_dependent:
+                    # Add time evolution
+                    omega = 2.0 + (self.difficulty_level - 1)
+                    psi = psi * np.exp(-1j * omega * self.t)[:, None]
+                    
+            elif self.dimensions == 2:
+                if self.difficulty_level == 1:
+                    # Simple 2D ground state
+                    psi = np.exp(-np.sqrt(k) * (self.x**2 + self.y**2)/2)
+                elif self.difficulty_level == 2:
+                    # Mix of ground and first excited states
+                    psi = 0.8 * np.exp(-np.sqrt(k) * (self.x**2 + self.y**2)/2) + \
+                          0.2 * (self.x + self.y) * np.exp(-np.sqrt(k) * (self.x**2 + self.y**2)/2)
+                else:
+                    # Complex 2D superposition
+                    psi = (0.6 * np.exp(-np.sqrt(k) * (self.x**2 + self.y**2)/2) + 
+                          0.3 * (self.x + self.y) * np.exp(-np.sqrt(k) * (self.x**2 + self.y**2)/2) +
+                          0.1 * (2 * (self.x**2 + self.y**2) - 1) * np.exp(-np.sqrt(k) * (self.x**2 + self.y**2)/2))
+                           
+                if self.time_dependent:
+                    # Add time evolution
+                    omega = 2.0 + (self.difficulty_level - 1)
+                    psi = psi * np.exp(-1j * omega * self.t)[:, None, None]
+                    
+            else:  # 3D
+                if self.difficulty_level == 1:
+                    # Simple 3D ground state
+                    psi = np.exp(-np.sqrt(k) * (self.x**2 + self.y**2 + self.z**2)/2)
+                elif self.difficulty_level == 2:
+                    # Mix of ground and first excited states
+                    psi = 0.8 * np.exp(-np.sqrt(k) * (self.x**2 + self.y**2 + self.z**2)/2) + \
+                          0.2 * (self.x + self.y + self.z) * np.exp(-np.sqrt(k) * (self.x**2 + self.y**2 + self.z**2)/2)
+                else:
+                    # Complex 3D superposition
+                    psi = (0.6 * np.exp(-np.sqrt(k) * (self.x**2 + self.y**2 + self.z**2)/2) + 
+                          0.3 * (self.x + self.y + self.z) * np.exp(-np.sqrt(k) * (self.x**2 + self.y**2 + self.z**2)/2) +
+                          0.1 * (2 * (self.x**2 + self.y**2 + self.z**2) - 1) * np.exp(-np.sqrt(k) * (self.x**2 + self.y**2 + self.z**2)/2))
+                          
+                if self.time_dependent:
+                    # Add time evolution
+                    omega = 2.0 + (self.difficulty_level - 1)
+                    psi = psi * np.exp(-1j * omega * self.t)[:, None, None, None]
         else:
             # Free particle case
             V = np.zeros_like(self.x)
-            if self.difficulty_level == 1:
-                # Simple sine wave
-                psi = np.sin(np.pi * (self.x + 1)/2)
-            elif self.difficulty_level == 2:
-                # Two sine waves
-                psi = 0.7 * np.sin(np.pi * (self.x + 1)/2) + 0.3 * np.sin(2 * np.pi * (self.x + 1)/2)
-            else:
-                # Complex wave packet
-                psi = (0.5 * np.sin(np.pi * (self.x + 1)/2) + 
-                      0.3 * np.sin(2 * np.pi * (self.x + 1)/2) +
-                      0.2 * np.sin(3 * np.pi * (self.x + 1)/2))
+            if self.dimensions == 1:
+                if self.difficulty_level == 1:
+                    # Simple sine wave
+                    psi = np.sin(np.pi * (self.x + 1)/2)
+                elif self.difficulty_level == 2:
+                    # Two sine waves
+                    psi = 0.7 * np.sin(np.pi * (self.x + 1)/2) + 0.3 * np.sin(2 * np.pi * (self.x + 1)/2)
+                else:
+                    # Complex wave packet
+                    psi = (0.5 * np.sin(np.pi * (self.x + 1)/2) + 
+                          0.3 * np.sin(2 * np.pi * (self.x + 1)/2) +
+                          0.2 * np.sin(3 * np.pi * (self.x + 1)/2))
+                          
+                if self.time_dependent:
+                    # Add time evolution
+                    k = 2.0 + (self.difficulty_level - 1)
+                    psi = psi * np.exp(-1j * k * self.t)[:, None]
+                    
+            elif self.dimensions == 2:
+                if self.difficulty_level == 1:
+                    # Simple 2D sine wave
+                    psi = np.sin(np.pi * (self.x + 1)/2) * np.sin(np.pi * (self.y + 1)/2)
+                elif self.difficulty_level == 2:
+                    # Two 2D sine waves
+                    psi = 0.7 * np.sin(np.pi * (self.x + 1)/2) * np.sin(np.pi * (self.y + 1)/2) + \
+                          0.3 * np.sin(2 * np.pi * (self.x + 1)/2) * np.sin(2 * np.pi * (self.y + 1)/2)
+                else:
+                    # Complex 2D wave packet
+                    psi = (0.5 * np.sin(np.pi * (self.x + 1)/2) * np.sin(np.pi * (self.y + 1)/2) + 
+                          0.3 * np.sin(2 * np.pi * (self.x + 1)/2) * np.sin(2 * np.pi * (self.y + 1)/2) +
+                          0.2 * np.sin(3 * np.pi * (self.x + 1)/2) * np.sin(3 * np.pi * (self.y + 1)/2))
+                          
+                if self.time_dependent:
+                    # Add time evolution
+                    k = 2.0 + (self.difficulty_level - 1)
+                    psi = psi * np.exp(-1j * k * self.t)[:, None, None]
+                    
+            else:  # 3D
+                if self.difficulty_level == 1:
+                    # Simple 3D sine wave
+                    psi = np.sin(np.pi * (self.x + 1)/2) * np.sin(np.pi * (self.y + 1)/2) * np.sin(np.pi * (self.z + 1)/2)
+                elif self.difficulty_level == 2:
+                    # Two 3D sine waves
+                    psi = 0.7 * np.sin(np.pi * (self.x + 1)/2) * np.sin(np.pi * (self.y + 1)/2) * np.sin(np.pi * (self.z + 1)/2) + \
+                          0.3 * np.sin(2 * np.pi * (self.x + 1)/2) * np.sin(2 * np.pi * (self.y + 1)/2) * np.sin(2 * np.pi * (self.z + 1)/2)
+                else:
+                    # Complex 3D wave packet
+                    psi = (0.5 * np.sin(np.pi * (self.x + 1)/2) * np.sin(np.pi * (self.y + 1)/2) * np.sin(np.pi * (self.z + 1)/2) + 
+                          0.3 * np.sin(2 * np.pi * (self.x + 1)/2) * np.sin(2 * np.pi * (self.y + 1)/2) * np.sin(2 * np.pi * (self.z + 1)/2) +
+                          0.2 * np.sin(3 * np.pi * (self.x + 1)/2) * np.sin(3 * np.pi * (self.y + 1)/2) * np.sin(3 * np.pi * (self.z + 1)/2))
+                          
+                if self.time_dependent:
+                    # Add time evolution
+                    k = 2.0 + (self.difficulty_level - 1)
+                    psi = psi * np.exp(-1j * k * self.t)[:, None, None, None]
         
         # Normalize wavefunction
-        psi = psi/np.linalg.norm(psi)
+        if self.dimensions == 1:
+            psi = psi/np.linalg.norm(psi)
+        elif self.dimensions == 2:
+            psi = psi/np.linalg.norm(psi.reshape(-1))
+        else:  # 3D
+            psi = psi/np.linalg.norm(psi.reshape(-1))
         
-        # Ensure correct shapes [seq_len, 1]
-        V = V.astype(np.float32)[:,None]
-        psi = psi.astype(np.float32)[:,None]
+        # Ensure correct shapes
+        if self.time_dependent:
+            if self.dimensions == 1:
+                V = V.astype(np.float32)[:, None]
+                psi = psi.astype(np.complex64)[:, None]
+            elif self.dimensions == 2:
+                V = V.astype(np.float32)[:, None, None]
+                psi = psi.astype(np.complex64)[:, None, None]
+            else:  # 3D
+                V = V.astype(np.float32)[:, None, None, None]
+                psi = psi.astype(np.complex64)[:, None, None, None]
+        else:
+            if self.dimensions == 1:
+                V = V.astype(np.float32)[:, None]
+                psi = psi.astype(np.complex64)[:, None]
+            elif self.dimensions == 2:
+                V = V.astype(np.float32)[None, None]
+                psi = psi.astype(np.complex64)[None, None]
+            else:  # 3D
+                V = V.astype(np.float32)[None, None, None]
+                psi = psi.astype(np.complex64)[None, None, None]
+                
         return V, psi
 
     def __getitem__(self, idx):
