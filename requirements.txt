@@ -1,24 +1,42 @@
-pytest
+# Core ML dependencies
 torch>=2.0.0
-torchvision
+torchvision>=0.15.0
 numpy>=1.21.0
-numba
-gensim
+scipy>=1.7.0
+numba>=0.56.0
+
+# Data processing and ML tools
+scikit-learn>=0.24.0
+pandas>=1.3.0
+datasets>=1.11.0
+transformers>=4.11.0
+
+# Visualization
 matplotlib>=3.4.0
 seaborn>=0.11.0
+pillow>=8.0.0
+
+# System and monitoring
 psutil>=5.8.0
 gputil>=1.4.0
-networkx>=2.6.0
-pillow>=8.0.0
 rich>=10.0.0
-tk>=0.1.0
-sympy>=1.9
-pynput>=1.7.0
 tqdm>=4.62.0
-pandas>=1.3.0
-scipy>=1.7.0
-scikit-learn>=0.24.0
-transformers>=4.11.0
-datasets>=1.11.0
-wandb>=0.12.0
-tensorboard>=2.7.0
+
+# Web and networking
+aiohttp>=3.8.0
+beautifulsoup4>=4.9.0
+
+# Compression and hashing
+lz4>=3.1.0
+xxhash>=2.0.0
+mmh3>=3.0.0
+
+# Computer vision
+opencv-python>=4.5.0
+
+# Testing
+pytest>=7.0.0
+
+# Optional dependencies
+wandb>=0.12.0  # Uncomment if using Weights & Biases
+tensorboard>=2.7.0  # Uncomment if using TensorBoard
