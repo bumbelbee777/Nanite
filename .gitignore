@@ -17,3 +17,4 @@ profiles/
 wavefunctions/
 checkpoints/
 configs/default.json
+pretrained/GoogleNews-vectors-negative300.bin

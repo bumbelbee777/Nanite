@@ -1,30 +1,21 @@
-import os
-import time
 import asyncio
-import threading
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from functools import lru_cache
-from collections import deque, defaultdict
-import sys
-from datetime import datetime
-from threading import Lock
-from typing import Union, List, Tuple, Dict, Optional, Set
 import bisect
 import hashlib
-from tqdm import tqdm
-import psutil
-import GPUtil
-
-from datasets import Dataset
-
-import torch
-from torch.utils.data import IterableDataset, DataLoader
-import numpy as np
-import mmap
-import json
 import logging
-import traceback
-import inspect
+import os
+import threading
+import time
+from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from threading import Lock
+
+import numpy as np
+import psutil
+import torch
+from datasets import Dataset
+from torch.utils.data import DataLoader, IterableDataset
+from tqdm import tqdm
 
 # ANSI color codes for Windows/Unix
 BLUE = "\033[94m"
@@ -39,7 +30,8 @@ CACHE_DIR = "cache"
 CHUNK_SIZE = 1000  # windows per chunk
 NPZ_EXT = ".npz"
 MAX_WORKERS = min(
-    psutil.cpu_count(logical=False), 4
+    psutil.cpu_count(logical=False),
+    4,
 )  # Limit workers for low-end devices
 BATCH_SIZE = 32  # Smaller batch size for CPU training
 PREFETCH_FACTOR = 2  # Number of batches to prefetch
@@ -81,7 +73,7 @@ class DatasetStats:
         print(f"{BLUE}📦 Average Chunk Size: {np.mean(self.chunk_sizes):.1f}")
         print(f"{MAGENTA}⚡ Average Load Time: {np.mean(self.load_times) * 1000:.1f}ms")
         print(
-            f"{YELLOW}💾 Cache Hit Rate: {self.cache_hits / (self.cache_hits + self.cache_misses) * 100:.1f}%"
+            f"{YELLOW}💾 Cache Hit Rate: {self.cache_hits / (self.cache_hits + self.cache_misses) * 100:.1f}%",
         )
         print(f"{RED}🧠 Memory Usage: {self.get_memory_usage():.1f}MB")
         print(f"{CYAN}⏱️  Total Time: {time.time() - self.start_time:.1f}s")
@@ -122,7 +114,7 @@ class OptimizedChunkedMMapDataset(Dataset):
 
         self.total_size = self.chunk_offsets[-1]
         print(
-            f"\n{GREEN}✅ Loaded {len(self.chunks)} chunks with {self.total_size:,} total samples{RESET}"
+            f"\n{GREEN}✅ Loaded {len(self.chunks)} chunks with {self.total_size:,} total samples{RESET}",
         )
 
     def _hash_data(self, data: np.ndarray) -> str:
@@ -162,7 +154,7 @@ class OptimizedChunkedMMapDataset(Dataset):
             # Return least recently used chunk
             return min(self.chunk_cache.items(), key=lambda x: x[1][1])[0]
 
-    async def _load_chunk_async(self, chunk_idx: int) -> Optional[np.ndarray]:
+    async def _load_chunk_async(self, chunk_idx: int) -> np.ndarray | None:
         """Load chunk asynchronously."""
         if chunk_idx >= len(self.chunks):
             return None
@@ -171,7 +163,8 @@ class OptimizedChunkedMMapDataset(Dataset):
             # Run numpy load in thread pool
             loop = asyncio.get_event_loop()
             chunk_data = await loop.run_in_executor(
-                self.thread_pool, lambda: self.chunks[chunk_idx].copy()
+                self.thread_pool,
+                lambda: self.chunks[chunk_idx].copy(),
             )
 
             # Deduplicate data
@@ -183,10 +176,9 @@ class OptimizedChunkedMMapDataset(Dataset):
             return None
 
     def __getitem__(
-        self, idx: Union[int, List[int]]
-    ) -> Union[
-        Tuple[torch.Tensor, torch.Tensor], List[Tuple[torch.Tensor, torch.Tensor]]
-    ]:
+        self,
+        idx: int | list[int],
+    ) -> tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]]:
         """Get item(s) from dataset with optimized loading."""
         start_time = time.time()
 
@@ -200,7 +192,7 @@ class OptimizedChunkedMMapDataset(Dataset):
 
         return result
 
-    def _get_single_item(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _get_single_item(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Get single item with optimized loading."""
         if not 0 <= idx < self.total_size:
             raise IndexError(f"Index {idx} out of range [0, {self.total_size})")
@@ -363,7 +355,7 @@ class ChunkedMMapDataset(Dataset):
 
         self.total_size = self.chunk_offsets[-1]
         print(
-            f"\n{GREEN}✅ Loaded {len(self.chunks)} chunks with {self.total_size:,} total samples{RESET}"
+            f"\n{GREEN}✅ Loaded {len(self.chunks)} chunks with {self.total_size:,} total samples{RESET}",
         )
 
     def _hash_data(self, data: np.ndarray) -> str:
@@ -403,7 +395,7 @@ class ChunkedMMapDataset(Dataset):
             # Return least recently used chunk
             return min(self.chunk_cache.items(), key=lambda x: x[1][1])[0]
 
-    async def _load_chunk_async(self, chunk_idx: int) -> Optional[np.ndarray]:
+    async def _load_chunk_async(self, chunk_idx: int) -> np.ndarray | None:
         """Load chunk asynchronously."""
         if chunk_idx >= len(self.chunks):
             return None
@@ -412,7 +404,8 @@ class ChunkedMMapDataset(Dataset):
             # Run numpy load in thread pool
             loop = asyncio.get_event_loop()
             chunk_data = await loop.run_in_executor(
-                self.thread_pool, lambda: self.chunks[chunk_idx].copy()
+                self.thread_pool,
+                lambda: self.chunks[chunk_idx].copy(),
             )
 
             # Deduplicate data
@@ -424,10 +417,9 @@ class ChunkedMMapDataset(Dataset):
             return None
 
     def __getitem__(
-        self, idx: Union[int, List[int]]
-    ) -> Union[
-        Tuple[torch.Tensor, torch.Tensor], List[Tuple[torch.Tensor, torch.Tensor]]
-    ]:
+        self,
+        idx: int | list[int],
+    ) -> tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]]:
         """Get item(s) from dataset with optimized loading."""
         start_time = time.time()
 
@@ -441,7 +433,7 @@ class ChunkedMMapDataset(Dataset):
 
         return result
 
-    def _get_single_item(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _get_single_item(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Get single item with optimized loading."""
         if not 0 <= idx < self.total_size:
             raise IndexError(f"Index {idx} out of range [0, {self.total_size})")
@@ -547,7 +539,8 @@ class IterableMMapDataset(IterableDataset):
         # Convert to complex tensors
         Vc = torch.complex(torch.from_numpy(V), torch.zeros_like(torch.from_numpy(V)))
         ψc = torch.complex(
-            torch.from_numpy(psi), torch.zeros_like(torch.from_numpy(psi))
+            torch.from_numpy(psi),
+            torch.zeros_like(torch.from_numpy(psi)),
         )
         return Vc, ψc
 
@@ -589,10 +582,10 @@ class IterableMMapDataset(IterableDataset):
 
                     # Get next chunk with timeout
                     chunk_idx, chunk_data = self.loop.run_until_complete(
-                        asyncio.wait_for(self.chunk_queue.get(), timeout=1.0)
+                        asyncio.wait_for(self.chunk_queue.get(), timeout=1.0),
                     )
                     self.current_chunk = chunk_data
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     if (
                         self.chunk_idx >= len(self.chunk_files)
                         and self.chunk_queue.empty()
@@ -727,7 +720,10 @@ class Logger:
         self._write(msg, level="debug")
 
     def log_forward_pass(
-        self, module: torch.nn.Module, input: torch.Tensor, output: torch.Tensor
+        self,
+        module: torch.nn.Module,
+        input: torch.Tensor,
+        output: torch.Tensor,
     ):
         """Log a forward pass."""
         msg = f"Forward pass in {module.__class__.__name__}"

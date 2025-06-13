@@ -1,9 +1,9 @@
-from .small import SmallModelConfig
-from .medium import MediumModelConfig
 from .large import LargeModelConfig
+from .medium import MediumModelConfig
+from .small import SmallModelConfig
 
 __all__ = [
-    "SmallModelConfig",
-    "MediumModelConfig",
     "LargeModelConfig",
+    "MediumModelConfig",
+    "SmallModelConfig",
 ]

@@ -1,19 +1,19 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import math
-import numpy as np
-from typing import Optional, Tuple, List
 import logging
+import math
 import os
 from datetime import datetime
 
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 from .concept import ConceptGraph
-from .ops import MultivectorOps, TensorCache, MixedPrecisionRouter, Quantizer
 from .config import ModelConfig
-from .vm import Opcode, BytecodeEngine
-from .tgu import ResponseGenerator
+from .ops import MultivectorOps
 from .shared import get_shared_ops
+from .tgu import ResponseGenerator
+from .vm import BytecodeEngine, Opcode
 
 
 class DebugLogger:
@@ -143,7 +143,7 @@ class TaskComplexityEstimator(nn.Module):
 class LinearLayer(nn.Module):
     """Linear layer with feature routing."""
 
-    def __init__(self, in_dim: int, out_dim: int, ops: Optional[MultivectorOps] = None):
+    def __init__(self, in_dim: int, out_dim: int, ops: MultivectorOps | None = None):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
@@ -151,7 +151,7 @@ class LinearLayer(nn.Module):
 
         # Initialize weights
         self.weight = nn.Parameter(
-            torch.randn(out_dim, in_dim, dtype=torch.complex64) * 0.01
+            torch.randn(out_dim, in_dim, dtype=torch.complex64) * 0.01,
         )
         self.bias = nn.Parameter(torch.zeros(out_dim, dtype=torch.complex64))
 
@@ -172,10 +172,10 @@ class FeatureRouter(nn.Module):
     def __init__(
         self,
         d_model: int,
-        hidden_dim: Optional[int] = None,
+        hidden_dim: int | None = None,
         threshold: float = 0.5,
-        estimator: Optional[TaskComplexityEstimator] = None,
-        ops: Optional[MultivectorOps] = None,
+        estimator: TaskComplexityEstimator | None = None,
+        ops: MultivectorOps | None = None,
     ):
         super().__init__()
         self.d_model = d_model
@@ -226,7 +226,7 @@ class LayerNorm(nn.Module):
 
         if x.shape[-1] != self.dim:
             raise ValueError(
-                f"Expected input dimension {self.dim}, but got {x.shape[-1]}"
+                f"Expected input dimension {self.dim}, but got {x.shape[-1]}",
             )
 
         return self.ops.complex_layer_norm(x, dim=-1)
@@ -281,7 +281,7 @@ class PositionalEncoding(nn.Module):
         # Generate frequencies and phases for the full d_model dimension
         position = torch.arange(self.max_seq_len).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, self.d_model, 2) * (-math.log(10000.0) / self.d_model)
+            torch.arange(0, self.d_model, 2) * (-math.log(10000.0) / self.d_model),
         )
 
         # Create full d_model dimensional encoding
@@ -293,7 +293,9 @@ class PositionalEncoding(nn.Module):
         self.register_buffer("phases", pos_enc)
 
     def forward(
-        self, x: torch.Tensor, ops: Optional[MultivectorOps] = None
+        self,
+        x: torch.Tensor,
+        ops: MultivectorOps | None = None,
     ) -> torch.Tensor:
         ops = ops or self.ops
         # Add positional encoding to each sequence position
@@ -342,11 +344,16 @@ class DynamicActivation(nn.Module):
         self.gamma = nn.Parameter(torch.ones(dim, dtype=torch.complex64))
 
     def forward(
-        self, x: torch.Tensor, ops: Optional[MultivectorOps] = None
+        self,
+        x: torch.Tensor,
+        ops: MultivectorOps | None = None,
     ) -> torch.Tensor:
         ops = ops or self.ops
         return ops.complex_activation(
-            x, alpha=self.alpha, beta=self.beta, gamma=self.gamma
+            x,
+            alpha=self.alpha,
+            beta=self.beta,
+            gamma=self.gamma,
         )
 
 
@@ -360,7 +367,7 @@ class MatrixTypeSelector(nn.Module):
 
         # Initialize parameters for matrix type selection
         self.type_weights = nn.Parameter(
-            torch.ones(4)
+            torch.ones(4),
         )  # Weights for different matrix types
         self.temperature = nn.Parameter(torch.ones(1) * 0.1)  # Temperature for softmax
 
@@ -390,12 +397,13 @@ class MatrixTypeSelector(nn.Module):
 
         # Stack features
         features = torch.stack(
-            [spectral_norm, sparsity, symmetry, locality], dim=-1
+            [spectral_norm, sparsity, symmetry, locality],
+            dim=-1,
         ).to(torch.complex64)
 
         return features
 
-    def forward(self, x: torch.Tensor) -> Tuple[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[str, torch.Tensor]:
         """Select matrix type and return corresponding parameters."""
         # Extract features
         features = self._extract_features(x)
@@ -427,7 +435,9 @@ class MatrixTypeSelector(nn.Module):
     def _generate_toeplitz_params(self, x: torch.Tensor) -> torch.Tensor:
         """Generate parameters for Toeplitz matrix."""
         diags = torch.zeros(
-            self.d_model * 2 - 1, device=x.device, dtype=torch.complex64
+            self.d_model * 2 - 1,
+            device=x.device,
+            dtype=torch.complex64,
         )
         for i in range(-self.d_model + 1, self.d_model):
             diags[i + self.d_model - 1] = torch.mean(torch.diagonal(x, offset=i))
@@ -467,7 +477,9 @@ class MatrixTypeSelector(nn.Module):
             if end_idx > start_idx:  # Only process if we have valid indices
                 # Extract the block from the key tensor
                 block = x[
-                    :, :, start_idx:end_idx
+                    :,
+                    :,
+                    start_idx:end_idx,
                 ]  # Shape: [batch_size, seq_len, block_size]
 
                 # Average across batch and sequence dimensions
@@ -475,7 +487,10 @@ class MatrixTypeSelector(nn.Module):
 
                 # Create a block matrix by repeating the average
                 block_matrix = torch.zeros(
-                    block_size, block_size, device=x.device, dtype=torch.complex64
+                    block_size,
+                    block_size,
+                    device=x.device,
+                    dtype=torch.complex64,
                 )
                 for j in range(block_size):
                     block_matrix[j, j:] = block_avg[: block_size - j]
@@ -493,11 +508,13 @@ class MatrixTypeSelector(nn.Module):
     def _generate_hankel_params(self, x: torch.Tensor) -> torch.Tensor:
         """Generate parameters for Hankel matrix."""
         anti_diags = torch.zeros(
-            self.d_model * 2 - 1, device=x.device, dtype=torch.complex64
+            self.d_model * 2 - 1,
+            device=x.device,
+            dtype=torch.complex64,
         )
         for i in range(-self.d_model + 1, self.d_model):
             anti_diags[i + self.d_model - 1] = torch.mean(
-                torch.diagonal(x.flip(-1), offset=i)
+                torch.diagonal(x.flip(-1), offset=i),
             )
         return anti_diags
 
@@ -512,20 +529,20 @@ class InfiniToeplitz(nn.Module):
         # Initialize complex parameters with proper scaling
         self.query = nn.Parameter(
             torch.randn(self.d_model, self.d_model, dtype=torch.complex64)
-            / np.sqrt(self.d_model)
+            / np.sqrt(self.d_model),
         )
         self.key = nn.Parameter(
             torch.randn(self.d_model, self.d_model, dtype=torch.complex64)
-            / np.sqrt(self.d_model)
+            / np.sqrt(self.d_model),
         )
         self.value = nn.Parameter(
             torch.randn(self.d_model, self.d_model, dtype=torch.complex64)
-            / np.sqrt(self.d_model)
+            / np.sqrt(self.d_model),
         )
 
         # Initialize matrix type selection weights
         self.type_weights = nn.Parameter(
-            torch.randn(4, 4) / np.sqrt(4)
+            torch.randn(4, 4) / np.sqrt(4),
         )  # 4 features, 4 matrix types
 
         # Initialize temperature parameter for softmax
@@ -550,7 +567,9 @@ class InfiniToeplitz(nn.Module):
 
         # Select matrix type and generate parameters
         matrix_type, params = ops.select_matrix_type(
-            k, self.type_weights, self.temperature
+            k,
+            self.type_weights,
+            self.temperature,
         )
 
         # Apply structured matrix to keys
@@ -573,7 +592,7 @@ class InfiniToeplitz(nn.Module):
 class ComplexMLP(nn.Module):
     """Complex-valued MLP with feature routing."""
 
-    def __init__(self, config: ModelConfig, ops: Optional[MultivectorOps] = None):
+    def __init__(self, config: ModelConfig, ops: MultivectorOps | None = None):
         super().__init__()
         self.config = config
         self.d_model = config.d_model
@@ -629,7 +648,9 @@ class TransformerLayer(nn.Module):
         return x
 
     def forward(
-        self, x: torch.Tensor, ops: Optional[MultivectorOps] = None
+        self,
+        x: torch.Tensor,
+        ops: MultivectorOps | None = None,
     ) -> torch.Tensor:
         x = self._sanitize_tensor(x, "transformer layer input")
         x = x + self.eps
@@ -656,15 +677,16 @@ class Transformer(nn.Module):
     def __init__(
         self,
         config: ModelConfig,
-        ops: Optional[MultivectorOps] = None,
+        ops: MultivectorOps | None = None,
         concept_graph=None,
-        debug_logger: Optional[DebugLogger] = None,
+        debug_logger: DebugLogger | None = None,
     ):
         super().__init__()
         self.config = config
         self.ops = ops or MultivectorOps()
         self.concept_graph = concept_graph or ConceptGraph(
-            max_size=config.concept_graph_size, num_basis=config.d_model
+            max_size=config.concept_graph_size,
+            num_basis=config.d_model,
         )
         self.debug = debug_logger or DebugLogger(print_to_stdout=False)
 
@@ -680,7 +702,7 @@ class Transformer(nn.Module):
             [
                 TransformerLayer(config, self.ops, self.concept_graph)
                 for _ in range(config.n_layers)
-            ]
+            ],
         )
 
         # Output projection
@@ -688,7 +710,10 @@ class Transformer(nn.Module):
 
         # Task complexity estimation
         self.complexity_estimator = TaskComplexityEstimator(
-            threshold=1e-3, eps=1e-6, feature_dim=32, use_fft=True
+            threshold=1e-3,
+            eps=1e-6,
+            feature_dim=32,
+            use_fft=True,
         )
 
         # Response generation components
@@ -725,7 +750,7 @@ class Transformer(nn.Module):
                         basis_weights=x[i, j],
                     )
 
-    def _generate_bytecode(self, x: torch.Tensor) -> List[Tuple[Opcode, List[str]]]:
+    def _generate_bytecode(self, x: torch.Tensor) -> list[tuple[Opcode, list[str]]]:
         """Generate bytecode from concept graph traversal."""
         # Get concept relationships
         concepts = self.concept_graph.get_top_concepts()
@@ -758,7 +783,9 @@ class Transformer(nn.Module):
             return Opcode.DIV
 
     def _execute_bytecode(
-        self, bytecode: List[Tuple[Opcode, List[str]]], x: torch.Tensor
+        self,
+        bytecode: list[tuple[Opcode, list[str]]],
+        x: torch.Tensor,
     ) -> torch.Tensor:
         """Execute bytecode instructions on input tensor."""
         # Create virtual machine
@@ -779,7 +806,7 @@ class Transformer(nn.Module):
     async def forward(
         self,
         x: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
         generate_response: bool = False,
         num_tokens: int = 10,
     ) -> torch.Tensor:
@@ -803,7 +830,9 @@ class Transformer(nn.Module):
         old_shape = x.shape
         x = self.attention(x)
         self.debug.log_shape_change(
-            "After InfiniToeplitz attention", old_shape, x.shape
+            "After InfiniToeplitz attention",
+            old_shape,
+            x.shape,
         )
         self.debug.log_tensor("After InfiniToeplitz attention", x)
 
@@ -812,7 +841,9 @@ class Transformer(nn.Module):
             old_shape = x.shape
             x = layer(x)
             self.debug.log_shape_change(
-                f"After transformer layer {i + 1}", old_shape, x.shape
+                f"After transformer layer {i + 1}",
+                old_shape,
+                x.shape,
             )
             self.debug.log_tensor(f"After transformer layer {i + 1}", x)
 
@@ -829,7 +860,8 @@ class Transformer(nn.Module):
             if complexity > 0.7:  # High complexity task
                 # Use full TGU-based response generation
                 candidates = await self.response_generator.generate_candidates(
-                    x, num_tokens
+                    x,
+                    num_tokens,
                 )
                 response = await self.response_generator.synthesize_response(candidates)
                 if response is not None:
@@ -868,7 +900,7 @@ class ComplexLinear(nn.Module):
         self.out_features = out_features
         scale = 0.01
         self.weight = nn.Parameter(
-            torch.randn(in_features, out_features, dtype=torch.complex64) * scale
+            torch.randn(in_features, out_features, dtype=torch.complex64) * scale,
         )
         self.bias = (
             nn.Parameter(torch.zeros(out_features, dtype=torch.complex64))

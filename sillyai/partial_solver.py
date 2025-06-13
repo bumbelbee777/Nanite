@@ -1,25 +1,21 @@
+import logging
+import os
+from collections import deque
+from datetime import datetime
+from urllib.parse import urljoin, urlparse
+
+import aiohttp
 import torch
 import torch.nn as nn
-from typing import Optional, List, Dict, Union, Set
-import os
-import json
-import logging
-from datetime import datetime
-from tqdm import tqdm
-import numpy as np
-import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
-import asyncio
-import aiohttp
-from collections import deque
+from tqdm import tqdm
 
-from .model import SillyAI
-from .config import ModelConfig, Modality
-from .utils import Logger
-from .configs.small import SmallModelConfig
-from .configs.medium import MediumModelConfig
+from .config import ModelConfig
 from .configs.large import LargeModelConfig
+from .configs.medium import MediumModelConfig
+from .configs.small import SmallModelConfig
+from .model import SillyAI
+from .utils import Logger
 
 
 class WikipediaCrawler:
@@ -28,7 +24,7 @@ class WikipediaCrawler:
     def __init__(self, max_depth: int = 7, max_pages: int = 100):
         self.max_depth = max_depth
         self.max_pages = max_pages
-        self.visited_urls: Set[str] = set()
+        self.visited_urls: set[str] = set()
         self.session = aiohttp.ClientSession()
 
     async def close(self):
@@ -44,7 +40,7 @@ class WikipediaCrawler:
             and ":" not in parsed.path  # Exclude special pages
         )
 
-    def _extract_links(self, soup: BeautifulSoup, base_url: str) -> List[str]:
+    def _extract_links(self, soup: BeautifulSoup, base_url: str) -> list[str]:
         """Extract Wikipedia links from BeautifulSoup object."""
         links = []
         for a in soup.find_all("a", href=True):
@@ -74,7 +70,7 @@ class WikipediaCrawler:
 
         return text
 
-    async def crawl_page(self, url: str) -> Dict[str, str]:
+    async def crawl_page(self, url: str) -> dict[str, str]:
         """Crawl a single Wikipedia page and return its content and links."""
         if url in self.visited_urls:
             return {}
@@ -98,7 +94,7 @@ class WikipediaCrawler:
             logging.error(f"Error crawling {url}: {e}")
             return {}
 
-    async def crawl(self, start_url: str) -> List[Dict[str, str]]:
+    async def crawl(self, start_url: str) -> list[dict[str, str]]:
         """Crawl Wikipedia pages starting from a given URL."""
         if not self._is_valid_wiki_url(start_url):
             raise ValueError("Invalid Wikipedia URL")
@@ -156,7 +152,7 @@ class PartialSolver(SillyAI):
         """
         # Initialize logger
         self.logger = Logger(
-            f"partial_solver_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            f"partial_solver_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         )
 
         # Set up model configuration
@@ -168,7 +164,9 @@ class PartialSolver(SillyAI):
 
         # Create config instance with overrides
         config = config_class(
-            max_seq_len=max_seq_len, vocab_size=vocab_size, device=device
+            max_seq_len=max_seq_len,
+            vocab_size=vocab_size,
+            device=device,
         )
 
         # Initialize base model
@@ -260,7 +258,7 @@ class PartialSolver(SillyAI):
                     self.logger.warning(
                         f"Warning: Checkpoint model size ({checkpoint_config.d_model}) "
                         f"doesn't match current model size ({self.config.d_model}). "
-                        f"Initializing new model."
+                        f"Initializing new model.",
                     )
                     return
 
@@ -271,7 +269,7 @@ class PartialSolver(SillyAI):
             except Exception as e:
                 self.logger.warning(
                     f"Could not load checkpoint weights due to size mismatch. "
-                    f"Initializing new model. Error: {e}"
+                    f"Initializing new model. Error: {e}",
                 )
         except Exception as e:
             self.logger.error(f"Error loading checkpoint: {e}")
@@ -283,7 +281,8 @@ class PartialSolver(SillyAI):
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         checkpoint_path = os.path.join(
-            self.checkpoint_dir, f"checkpoint_{timestamp}.pt"
+            self.checkpoint_dir,
+            f"checkpoint_{timestamp}.pt",
         )
 
         try:
@@ -305,7 +304,9 @@ class PartialSolver(SillyAI):
 
             # Generate response with compiled model
             response = await self.generate_response(
-                input_tensor, num_tokens=self.max_tokens, temperature=0.7
+                input_tensor,
+                num_tokens=self.max_tokens,
+                temperature=0.7,
             )
 
             # Convert response to text with compiled decoder
@@ -341,7 +342,7 @@ class PartialSolver(SillyAI):
             self.logger.error(f"Error solving equation: {e}")
             return "I apologize, but I encountered an error while solving the equation."
 
-    def get_model_stats(self) -> Dict[str, Union[int, float]]:
+    def get_model_stats(self) -> dict[str, int | float]:
         """Calculate model statistics.
 
         Returns:
@@ -410,7 +411,7 @@ class PartialSolver(SillyAI):
     async def train_on_wikipedia(self, start_url: str, max_pages: int = 100):
         """Train the model on Wikipedia pages."""
         self.logger.info(f"Starting Wikipedia training from {start_url}")
-        print(f"\n🌐 Starting Wikipedia Training")
+        print("\n🌐 Starting Wikipedia Training")
         print(f"📚 Starting URL: {start_url}")
         print(f"📑 Max Pages: {max_pages}")
         print(f"💻 Device: {self.config.device}")
@@ -461,7 +462,7 @@ class PartialSolver(SillyAI):
                     {
                         "loss": f"{loss:.4f}",
                         "avg_loss": f"{total_loss / (len(pages) + 1):.4f}",
-                    }
+                    },
                 )
 
                 # Save checkpoint if loss improved
@@ -474,7 +475,7 @@ class PartialSolver(SillyAI):
 
                 # Early stopping
                 if patience_counter >= early_stop_patience:
-                    print(f"\n⚠️ Early stopping triggered")
+                    print("\n⚠️ Early stopping triggered")
                     break
 
         # Print final statistics
@@ -488,7 +489,7 @@ class PartialSolver(SillyAI):
 
         self.logger.info("Wikipedia training completed")
 
-    def _split_into_chunks(self, text: str, chunk_size: int = 512) -> List[str]:
+    def _split_into_chunks(self, text: str, chunk_size: int = 512) -> list[str]:
         """Split text into chunks of approximately equal size."""
         words = text.split()
         chunks = []
@@ -509,7 +510,7 @@ class PartialSolver(SillyAI):
 
         return chunks
 
-    def _generate_target(self, chunk: str, all_chunks: List[str]) -> str:
+    def _generate_target(self, chunk: str, all_chunks: list[str]) -> str:
         """Generate target text for training."""
         # Try to find the next chunk
         try:
@@ -534,7 +535,9 @@ class PartialSolver(SillyAI):
         return summary
 
     def _train_step(
-        self, input_tensor: torch.Tensor, target_tensor: torch.Tensor
+        self,
+        input_tensor: torch.Tensor,
+        target_tensor: torch.Tensor,
     ) -> float:
         """Perform a single training step with compiled operations."""
         # Forward pass with compiled model

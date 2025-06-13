@@ -1,13 +1,11 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import List, Dict, Optional, Tuple
 import asyncio
-from dataclasses import dataclass
-import numpy as np
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime
+
+import torch
+import torch.nn as nn
 
 
 @dataclass
@@ -59,7 +57,10 @@ class TokenGenerationUnit(nn.Module):
 
         # Cross-attention for TGU communication
         self.cross_attention = nn.MultiheadAttention(
-            d_model, n_heads, dropout=dropout, batch_first=True
+            d_model,
+            n_heads,
+            dropout=dropout,
+            batch_first=True,
         )
 
         # Token prediction head
@@ -74,14 +75,14 @@ class TokenGenerationUnit(nn.Module):
         self.latent_state = None
         self.latent_lock = asyncio.Lock()
 
-    def _log_generation_step(self, step: int, details: Dict):
+    def _log_generation_step(self, step: int, details: dict):
         """Log token generation step details."""
         self.logger.debug(f"Generation step {step}: {details}")
 
     async def forward(
         self,
         hidden_states: torch.Tensor,
-        other_tgu_states: Optional[List[torch.Tensor]] = None,
+        other_tgu_states: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Generate next token prediction asynchronously.
 
@@ -99,14 +100,17 @@ class TokenGenerationUnit(nn.Module):
             else:
                 # Combine with new hidden states
                 self.latent_state = torch.cat(
-                    [self.latent_state, hidden_states[:, -1:]], dim=1
+                    [self.latent_state, hidden_states[:, -1:]],
+                    dim=1,
                 )
 
             # Cross-attention with other TGUs if available
             if other_tgu_states:
                 other_states = torch.stack(other_tgu_states, dim=1)
                 attn_output, _ = self.cross_attention(
-                    self.latent_state, other_states, other_states
+                    self.latent_state,
+                    other_states,
+                    other_states,
                 )
                 self.latent_state = attn_output
 
@@ -190,13 +194,15 @@ class ResponseGenerator(nn.Module):
             num_layers=2,
         )
 
-    def _log_candidate_generation(self, candidate_id: int, details: Dict):
+    def _log_candidate_generation(self, candidate_id: int, details: dict):
         """Log candidate generation details."""
         self.logger.debug(f"Candidate {candidate_id}: {details}")
 
     async def generate_candidates(
-        self, hidden_states: torch.Tensor, num_tokens: int
-    ) -> List[CandidateResponse]:
+        self,
+        hidden_states: torch.Tensor,
+        num_tokens: int,
+    ) -> list[CandidateResponse]:
         """Generate multiple response candidates using TGUs.
 
         Args:
@@ -210,7 +216,8 @@ class ResponseGenerator(nn.Module):
 
         # Log generation start
         self._log_candidate_generation(
-            0, {"input_shape": hidden_states.shape, "num_tokens": num_tokens}
+            0,
+            {"input_shape": hidden_states.shape, "num_tokens": num_tokens},
         )
 
         for _ in range(self.max_candidates):
@@ -233,7 +240,8 @@ class ResponseGenerator(nn.Module):
 
                 # Update hidden states for next iteration
                 hidden_states = torch.cat(
-                    [hidden_states, next_token.unsqueeze(1)], dim=1
+                    [hidden_states, next_token.unsqueeze(1)],
+                    dim=1,
                 )
 
             # Score the candidate
@@ -288,7 +296,7 @@ class ResponseGenerator(nn.Module):
         self.logger.debug(
             f"Score candidate: coherence={coherence:.4f}, "
             f"accuracy={accuracy:.4f}, relevancy={relevancy:.4f}, "
-            f"factuality={factuality:.4f}, score={score:.4f}"
+            f"factuality={factuality:.4f}, score={score:.4f}",
         )
 
         return CandidateResponse(
@@ -301,8 +309,9 @@ class ResponseGenerator(nn.Module):
         )
 
     async def synthesize_response(
-        self, candidates: List[CandidateResponse]
-    ) -> Optional[torch.Tensor]:
+        self,
+        candidates: list[CandidateResponse],
+    ) -> torch.Tensor | None:
         """Synthesize final response from candidates."""
         if not candidates:
             self.logger.warning("No candidates to synthesize from")
@@ -316,7 +325,7 @@ class ResponseGenerator(nn.Module):
         self.logger.debug(
             f"Synthesized response: score={best.score:.4f}, "
             f"coherence={best.coherence:.4f}, accuracy={best.accuracy:.4f}, "
-            f"relevancy={best.relevancy:.4f}, factuality={best.factuality:.4f}"
+            f"relevancy={best.relevancy:.4f}, factuality={best.factuality:.4f}",
         )
 
         return best.tokens

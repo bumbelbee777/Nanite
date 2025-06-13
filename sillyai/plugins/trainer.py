@@ -1,56 +1,43 @@
+import asyncio
+import hashlib
+import logging
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from threading import Lock
+from urllib.parse import urljoin, urlparse
+
+import aiohttp
+import numpy as np
+import psutil
+import torch
+import torch.optim as optim
+from bs4 import BeautifulSoup
+from torch.utils.data import Dataset
+from tqdm import tqdm
+
+from ..model import SillyAI
 from ..plugin import SillyPlugin
 from ..utils import (
-    ChunkedMMapDataset,
-    CACHE_DIR,
-    Logger,
-    IterableMMapDataset,
-    OptimizedDataLoader,
-    DatasetStats,
-    BLUE,
-    YELLOW,
-    RED,
-    GREEN,
-    MAGENTA,
     CYAN,
+    GREEN,
     RESET,
+    YELLOW,
+    DatasetStats,
+    OptimizedDataLoader,
 )
-from ..config import ModelConfig
-from ..ops import ComplexLoss
-from .visualizer import ModelProfiler, load_best_model
-import torch
-from torch.utils.data import DataLoader, ConcatDataset, TensorDataset, Dataset
-import torch.nn as nn
-import numpy as np
-import os
-import time
-from datetime import timedelta, datetime
-import asyncio
-from pathlib import Path
 from .dynamic_learning_rate import DynamicLearningRate
-import matplotlib.pyplot as plt
-import logging
-import torch.optim as optim
-from typing import Optional, Dict, List, Tuple, Union
-import random
-import re
-import math
-from tqdm import tqdm
-from ..model import SillyAI
-import hashlib
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
-import psutil
-import aiohttp
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
+from .visualizer import ModelProfiler, load_best_model
 
 # Constants for optimization
 MAX_WORKERS = min(
-    psutil.cpu_count(logical=False), 16
+    psutil.cpu_count(logical=False),
+    16,
 )  # Limit workers for low-end devices
 BATCH_SIZE = 32  # Smaller batch size for CPU training
 PREFETCH_FACTOR = min(
-    4, max(2, psutil.cpu_count(logical=False) // 2)
+    4,
+    max(2, psutil.cpu_count(logical=False) // 2),
 )  # Adaptive prefetch based on CPU cores
 CHUNK_SIZE = 1000  # Number of samples per chunk
 CACHE_SIZE = 1000  # Number of samples to keep in memory cache
@@ -115,7 +102,7 @@ class WikipediaDataset(Dataset):
             and ":" not in parsed.path  # Exclude special pages
         )
 
-    def _extract_links(self, soup: BeautifulSoup, base_url: str) -> List[str]:
+    def _extract_links(self, soup: BeautifulSoup, base_url: str) -> list[str]:
         """Extract Wikipedia links from BeautifulSoup object."""
         links = []
         for a in soup.find_all("a", href=True):
@@ -145,7 +132,7 @@ class WikipediaDataset(Dataset):
 
         return text
 
-    async def _crawl_page(self, url: str) -> Dict[str, str]:
+    async def _crawl_page(self, url: str) -> dict[str, str]:
         """Crawl a single Wikipedia page and return its content and links."""
         try:
             async with self.session.get(url) as response:
@@ -165,7 +152,7 @@ class WikipediaDataset(Dataset):
             logger.error(f"Error crawling {url}: {e}")
             return {}
 
-    async def _crawl_pages(self) -> List[Dict[str, str]]:
+    async def _crawl_pages(self) -> list[dict[str, str]]:
         """Crawl Wikipedia pages starting from the given URL."""
         if not self._is_valid_wiki_url(self.start_url):
             raise ValueError("Invalid Wikipedia URL")
@@ -192,9 +179,9 @@ class WikipediaDataset(Dataset):
 
         return pages
 
-    def _load_or_create_chunks(self) -> List[Dict]:
+    def _load_or_create_chunks(self) -> list[dict]:
         """Load existing chunks or create new ones from Wikipedia."""
-        chunk_files = sorted(self.cache_dir.glob(f"wikipedia_chunk_*.npz"))
+        chunk_files = sorted(self.cache_dir.glob("wikipedia_chunk_*.npz"))
 
         if chunk_files:
             print(f"\n{CYAN}📚 Loading cached Wikipedia chunks...{RESET}")
@@ -211,7 +198,7 @@ class WikipediaDataset(Dataset):
         print(f"\n{CYAN}🔄 Creating new Wikipedia chunks...{RESET}")
         return self._create_chunks()
 
-    def _create_chunks(self) -> List[Dict]:
+    def _create_chunks(self) -> list[dict]:
         """Create chunks from Wikipedia pages with parallel processing."""
         # Crawl Wikipedia pages
         pages = asyncio.run(self._crawl_pages())
@@ -257,7 +244,7 @@ class WikipediaDataset(Dataset):
         print(f"{GREEN}✅ Created {len(chunks)} chunks{RESET}")
         return chunks
 
-    def _process_sample(self, item: Dict) -> Optional[Dict]:
+    def _process_sample(self, item: dict) -> dict | None:
         """Process a single Wikipedia page with optimized tokenization."""
         content = item["content"]
         if not content:
@@ -272,7 +259,7 @@ class WikipediaDataset(Dataset):
         with torch.no_grad():  # Disable gradient tracking
             input_tokens = self.model.process_text(chunks[0])
             target_tokens = self.model.process_text(
-                chunks[1] if len(chunks) > 1 else chunks[0]
+                chunks[1] if len(chunks) > 1 else chunks[0],
             )
 
             # Convert to numpy for storage
@@ -287,7 +274,7 @@ class WikipediaDataset(Dataset):
             "hash": hashlib.md5(content.encode()).hexdigest(),
         }
 
-    def _split_into_chunks(self, text: str, chunk_size: int = 512) -> List[str]:
+    def _split_into_chunks(self, text: str, chunk_size: int = 512) -> list[str]:
         """Split text into chunks of approximately equal size."""
         words = text.split()
         chunks = []
@@ -308,7 +295,7 @@ class WikipediaDataset(Dataset):
 
         return chunks
 
-    def _save_chunk(self, chunk: List[Dict], path: Path):
+    def _save_chunk(self, chunk: list[dict], path: Path):
         """Save chunk with compression."""
         # Convert chunk to numpy arrays
         inputs = np.array([s["input"] for s in chunk])
@@ -352,7 +339,7 @@ class WikipediaDataset(Dataset):
             # Return least recently used chunk
             return min(self.token_cache.items(), key=lambda x: x[1][1])[0]
 
-    async def _load_chunk_async(self, chunk_idx: int) -> Optional[np.ndarray]:
+    async def _load_chunk_async(self, chunk_idx: int) -> np.ndarray | None:
         """Load chunk asynchronously with memory mapping."""
         if chunk_idx >= len(self.chunks):
             return None
@@ -361,7 +348,8 @@ class WikipediaDataset(Dataset):
             # Run numpy load in thread pool
             loop = asyncio.get_event_loop()
             chunk_data = await loop.run_in_executor(
-                self.thread_pool, lambda: self.chunks[chunk_idx].copy()
+                self.thread_pool,
+                lambda: self.chunks[chunk_idx].copy(),
             )
 
             # Deduplicate data
@@ -384,7 +372,7 @@ class WikipediaDataset(Dataset):
 
         return data[unique_indices]
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Get a sample from the dataset with optimized loading."""
         start_time = time.time()
 
@@ -485,12 +473,16 @@ class SillyAITrainerPlugin(SillyPlugin):
 
         # Initialize optimizer with dynamic learning rate
         self.optimizer = optim.AdamW(
-            self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
+            self.model.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay,
         )
 
         # Initialize learning rate scheduler
         self.scheduler = DynamicLearningRate(
-            self.optimizer, warmup_steps=1000, d_model=self.model.config.d_model
+            self.optimizer,
+            warmup_steps=1000,
+            d_model=self.model.config.d_model,
         )
 
         # Initialize profiler
@@ -604,7 +596,7 @@ class SillyAITrainerPlugin(SillyPlugin):
 
             # Update metrics
             self.training_metrics.append(
-                {"epoch": epoch + 1, "train_loss": train_loss, "val_loss": val_loss}
+                {"epoch": epoch + 1, "train_loss": train_loss, "val_loss": val_loss},
             )
 
             # Update resource metrics
@@ -646,7 +638,8 @@ class SillyAITrainerPlugin(SillyPlugin):
         # Pad sequences
         input_tensor = torch.nn.utils.rnn.pad_sequence(input_tensors, batch_first=True)
         target_tensor = torch.nn.utils.rnn.pad_sequence(
-            target_tensors, batch_first=True
+            target_tensors,
+            batch_first=True,
         )
 
         return input_tensor, target_tensor
@@ -681,19 +674,15 @@ class SillyAITrainerPlugin(SillyPlugin):
 
     def on_enable(self):
         """Called when plugin is enabled."""
-        pass
 
     def on_disable(self):
         """Called when plugin is disabled."""
-        pass
 
     def on_epoch_start(self, epoch):
         """Called at the start of each epoch."""
-        pass
 
     def on_epoch_end(self, epoch, metrics):
         """Called at the end of each epoch."""
-        pass
 
     def train_on_wikipedia(
         self,
@@ -706,7 +695,9 @@ class SillyAITrainerPlugin(SillyPlugin):
         """Train the model on Wikipedia pages."""
         # Create Wikipedia dataset
         self.train_dataset = WikipediaDataset(
-            self.model, start_url=start_url, max_pages=max_pages
+            self.model,
+            start_url=start_url,
+            max_pages=max_pages,
         )
 
         # Setup trainer

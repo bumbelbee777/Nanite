@@ -1,20 +1,20 @@
-import torch, asyncio, io, hashlib, lz4.frame as lz4
-import torch.nn.functional as F
-from torch import nn, linalg as LA
-from enum import Enum
-from collections import deque, defaultdict
-from dataclasses import dataclass
-from typing import Optional, Tuple, List, Dict, Any, Union, Set, Callable
-import math
-import warnings
-import numpy as np
-import numba
-from numba import jit, prange, int64, float64, complex128
-import xxhash
-import mmh3
+import asyncio
+import hashlib
+import io
+from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
-import scipy.sparse as sp
+from dataclasses import dataclass
+from typing import Any
+
+import lz4.frame as lz4
+import mmh3
+import numpy as np
+import torch
+import torch.nn.functional as F
+import xxhash
+from numba import complex128, float64, int64, jit, prange
+from torch import linalg as LA
+from torch import nn
 
 from .config import PrecisionLevel
 
@@ -52,7 +52,9 @@ class Quantizer(nn.Module):
         # Ensure x is real-valued before quantization
         x = x.real if torch.is_complex(x) else x
         q = torch.clamp(
-            torch.round(x / self.scale + self.zero_point), self.qmin, self.qmax
+            torch.round(x / self.scale + self.zero_point),
+            self.qmin,
+            self.qmax,
         )
         return (q,)
 
@@ -178,7 +180,7 @@ class TensorCache:
             return ((q[0].float() - z) * s).to(device)
         r, i = q
         return torch.view_as_complex(
-            torch.stack([((r - z) * s), ((i - z) * s)], -1)
+            torch.stack([((r - z) * s), ((i - z) * s)], -1),
         ).to(device)
 
     @torch.jit.ignore
@@ -304,7 +306,7 @@ class TensorHasher:
 
     def __init__(self, strategy: str = "auto") -> None:
         self.strategy = strategy
-        self._hash_cache: Dict[int, int] = {}
+        self._hash_cache: dict[int, int] = {}
         self._hash_cache_size = 10000
 
     def hash_tensor(self, tensor: torch.Tensor) -> int:
@@ -348,7 +350,9 @@ class TensorHasher:
 
 @jit(nopython=True, parallel=True)
 def _fast_bitplane_ops(
-    a_bp: np.ndarray, b_bp: np.ndarray, op_type: int64
+    a_bp: np.ndarray,
+    b_bp: np.ndarray,
+    op_type: int64,
 ) -> np.ndarray:
     """Ultra-fast bitplane operations using Numba."""
     result = np.zeros_like(a_bp)
@@ -422,7 +426,9 @@ def _compute_blade_parity(a: int64, b: int64) -> int64:
 
 @jit(nopython=True, parallel=True)
 def _fast_geometric_product_bitwise(
-    a: np.ndarray, b: np.ndarray, dim: int64
+    a: np.ndarray,
+    b: np.ndarray,
+    dim: int64,
 ) -> np.ndarray:
     """Ultra-fast geometric product using bitwise operations and Numba JIT."""
     result = np.zeros_like(a)
@@ -519,15 +525,15 @@ class MultivectorOps(nn.Module):
         super().__init__()
         self.cmax = cmax
         self._compiled = False
-        self._cache: Dict[Tuple[int, int], np.ndarray] = {}
+        self._cache: dict[tuple[int, int], np.ndarray] = {}
         self._cache_size = 10000
-        self._bitplane_cache: Dict[int, np.ndarray] = {}
+        self._bitplane_cache: dict[int, np.ndarray] = {}
 
         # Initialize thread pool for parallel operations
         self.executor = ThreadPoolExecutor(max_workers=4)
 
         # Pre-compute common basis transformations
-        self._basis_cache: Dict[int, np.ndarray] = {}
+        self._basis_cache: dict[int, np.ndarray] = {}
 
         # Initialize tensor hasher
         self._tensor_hasher = TensorHasher()
@@ -550,7 +556,7 @@ class MultivectorOps(nn.Module):
         for i in range(256):
             for j in range(256):
                 self._grade_diff_table[i, j] = abs(
-                    _compute_blade_grade(i) - _compute_blade_grade(j)
+                    _compute_blade_grade(i) - _compute_blade_grade(j),
                 )
 
         # Precompute grade sums for outer product
@@ -558,7 +564,7 @@ class MultivectorOps(nn.Module):
         for i in range(256):
             for j in range(256):
                 self._grade_sum_table[i, j] = _compute_blade_grade(
-                    i
+                    i,
                 ) + _compute_blade_grade(j)
 
     async def geometric_product(self, A: Any, B: Any) -> np.ndarray:
@@ -617,10 +623,14 @@ def complex_checkpoint(function, *args):
         if torch.is_tensor(arg) and arg.is_complex():
             # Sanitize complex tensor before splitting
             real_part = torch.where(
-                torch.isnan(arg.real), torch.tensor(1e-8, device=arg.device), arg.real
+                torch.isnan(arg.real),
+                torch.tensor(1e-8, device=arg.device),
+                arg.real,
             )
             imag_part = torch.where(
-                torch.isnan(arg.imag), torch.tensor(1e-8, device=arg.device), arg.imag
+                torch.isnan(arg.imag),
+                torch.tensor(1e-8, device=arg.device),
+                arg.imag,
             )
             real_args.extend([real_part, imag_part])
         else:
@@ -657,7 +667,9 @@ def complex_checkpoint(function, *args):
         result = function(*reconstructed_args)
         if torch.is_tensor(result) and result.is_complex():
             result = torch.where(
-                torch.isnan(result), torch.tensor(1e-8, device=result.device), result
+                torch.isnan(result),
+                torch.tensor(1e-8, device=result.device),
+                result,
             )
         return result
 
@@ -692,7 +704,9 @@ class ComplexLoss(nn.Module):
             if torch.isinf(x).any():
                 print(f"WARNING: Inf values detected in {name}")
                 x = torch.where(
-                    torch.isinf(x), torch.tensor(self.eps, device=x.device), x
+                    torch.isinf(x),
+                    torch.tensor(self.eps, device=x.device),
+                    x,
                 )
 
             # Check for extremely large values
@@ -748,7 +762,9 @@ class ComplexLoss(nn.Module):
         return self._sanitize_tensor(total_loss, "total loss")
 
     def _compute_phase_loss(
-        self, pred: torch.Tensor, target: torch.Tensor
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
     ) -> torch.Tensor:
         """Compute phase loss with enhanced numerical stability."""
         # Compute phases
@@ -788,12 +804,14 @@ class ComplexLoss(nn.Module):
 
         # Reshape concept embeddings to match
         concept_embeddings = concept_embeddings.reshape(
-            -1, concept_embeddings.shape[-1]
+            -1,
+            concept_embeddings.shape[-1],
         )  # [4096, 64]
 
         # Compute similarity matrix
         similarity = torch.matmul(
-            pred_reshaped, concept_embeddings.transpose(-2, -1)
+            pred_reshaped,
+            concept_embeddings.transpose(-2, -1),
         )  # [16, 64, 4096]
         similarity = self._sanitize_tensor(similarity, "concept similarity")
 

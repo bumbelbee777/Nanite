@@ -1,13 +1,11 @@
-from importlib import import_module
-from pathlib import Path
-from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Any, Callable
-import inspect
 import logging
-from datetime import datetime
 import weakref
+from abc import ABC
+from datetime import datetime
+from importlib import import_module
+from typing import Any
 
-from .ops import TensorCache, MixedPrecisionRouter
+from .ops import MixedPrecisionRouter, TensorCache
 
 logger = logging.getLogger(__name__)
 
@@ -59,23 +57,18 @@ class SillyPlugin(ABC):
 
     def after_backward(self):
         """Called after loss.backward()"""
-        pass
 
     def before_optimize(self):
         """Called before optimizer.step()"""
-        pass
 
     def after_optimize(self):
         """Called after optimizer.step()"""
-        pass
 
     def on_epoch_start(self, epoch: int):
         """Called at the start of each training epoch"""
-        pass
 
     def on_epoch_end(self, epoch: int, metrics: dict):
         """Called at the end of each training epoch"""
-        pass
 
     def on_save(self) -> dict:
         """Called when model is being saved. Return dict of plugin state to save."""
@@ -83,7 +76,6 @@ class SillyPlugin(ABC):
 
     def on_load(self, state: dict):
         """Called when model is being loaded with plugin's saved state."""
-        pass
 
 
 class PluginManager:
@@ -109,7 +101,7 @@ class PluginManager:
         self.tensor_cache.initialize()
         self.mixed_precision.initialize()
         logger.info(
-            "PluginManager initialized with TensorCache and MixedPrecisionRouter"
+            "PluginManager initialized with TensorCache and MixedPrecisionRouter",
         )
 
     def load_plugin(self, plugin_name: str) -> bool:
@@ -134,7 +126,7 @@ class PluginManager:
                 plugin_class = getattr(module, f"{plugin_name}Plugin")
                 plugin = plugin_class()
             except (ImportError, AttributeError) as e:
-                logger.error(f"Failed to load plugin {plugin_name}: {str(e)}")
+                logger.error(f"Failed to load plugin {plugin_name}: {e!s}")
                 return False
 
             # Initialize plugin with model reference
@@ -154,7 +146,7 @@ class PluginManager:
             return True
 
         except Exception as e:
-            logger.error(f"Error loading plugin {plugin_name}: {str(e)}")
+            logger.error(f"Error loading plugin {plugin_name}: {e!s}")
             return False
 
     def unload_plugin(self, plugin_name: str) -> bool:
@@ -189,7 +181,7 @@ class PluginManager:
             return True
 
         except Exception as e:
-            logger.error(f"Error unloading plugin {plugin_name}: {str(e)}")
+            logger.error(f"Error unloading plugin {plugin_name}: {e!s}")
             return False
 
     def cleanup(self):
@@ -213,29 +205,29 @@ class PluginManager:
             try:
                 result = hook(result, *args[1:], **kwargs)
             except Exception as e:
-                logger.error(f"Error in hook {hook_name}: {str(e)}")
+                logger.error(f"Error in hook {hook_name}: {e!s}")
 
         return result
 
-    def get_states(self) -> Dict[str, Any]:
+    def get_states(self) -> dict[str, Any]:
         """Get states for saving."""
         return {
             "tensor_cache": self.tensor_cache.get_state(),
             "mixed_precision": self.mixed_precision.get_state(),
         }
 
-    def load_states(self, states: Dict[str, Any]):
+    def load_states(self, states: dict[str, Any]):
         """Load states."""
         if "tensor_cache" in states:
             self.tensor_cache.load_state(states["tensor_cache"])
         if "mixed_precision" in states:
             self.mixed_precision.load_state(states["mixed_precision"])
 
-    def list_plugins(self) -> List[str]:
+    def list_plugins(self) -> list[str]:
         """List available operations."""
         return ["TensorCache", "MixedPrecisionRouter"]
 
-    def get_plugin(self, name: str) -> Optional[Any]:
+    def get_plugin(self, name: str) -> Any | None:
         """Get an operation instance by name."""
         if name == "TensorCache":
             return self.tensor_cache

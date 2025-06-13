@@ -1,18 +1,15 @@
+import queue
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from threading import Lock
+
+import cv2
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import List, Dict, Optional, Union, Tuple
-import numpy as np
-from scipy.fft import dct, idct
-import cv2
-from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
-import queue
-import threading
-from threading import Lock
-import time
-import numba
 from numba import jit, prange
+from scipy.fft import dct
 
 from .ops import MultivectorOps
 from .shared import get_shared_ops
@@ -20,7 +17,10 @@ from .shared import get_shared_ops
 
 @jit(nopython=True, parallel=True)
 def _compute_basis_functions(
-    x: np.ndarray, frequencies: np.ndarray, phases: np.ndarray, amplitudes: np.ndarray
+    x: np.ndarray,
+    frequencies: np.ndarray,
+    phases: np.ndarray,
+    amplitudes: np.ndarray,
 ) -> np.ndarray:
     """Compute complex-valued basis functions for token embedding."""
     n = len(x)
@@ -28,7 +28,7 @@ def _compute_basis_functions(
     for i in prange(n):
         for j in range(len(frequencies)):
             result[i] += amplitudes[j] * np.exp(
-                1j * (frequencies[j] * x[i] + phases[j])
+                1j * (frequencies[j] * x[i] + phases[j]),
             )
     return result
 
@@ -38,10 +38,10 @@ class TokenFunction:
     """Complex-valued periodic function for token representation."""
 
     num_basis: int
-    frequencies: Optional[np.ndarray] = None
-    phases: Optional[np.ndarray] = None
-    amplitudes: Optional[np.ndarray] = None
-    embedding: Optional[np.ndarray] = None
+    frequencies: np.ndarray | None = None
+    phases: np.ndarray | None = None
+    amplitudes: np.ndarray | None = None
+    embedding: np.ndarray | None = None
 
     def to_tensor(self) -> torch.Tensor:
         """Convert function to tensor representation."""
@@ -54,7 +54,10 @@ class ComplexTokenStream:
     """Lock-free token stream with complex-valued periodic functions."""
 
     def __init__(
-        self, buffer_size: int = 1024, num_workers: int = 4, num_basis: int = 32
+        self,
+        buffer_size: int = 1024,
+        num_workers: int = 4,
+        num_basis: int = 32,
     ):
         self.buffer_size = buffer_size
         self.num_workers = num_workers
@@ -68,11 +71,13 @@ class ComplexTokenStream:
         self.thread_pool = ThreadPoolExecutor(max_workers=num_workers)
 
         # Initialize token storage
-        self.token_functions: Dict[int, TokenFunction] = {}
+        self.token_functions: dict[int, TokenFunction] = {}
         self.token_lock = Lock()
 
     def push_tokens(
-        self, tokens: List[int], functions: Optional[List[TokenFunction]] = None
+        self,
+        tokens: list[int],
+        functions: list[TokenFunction] | None = None,
     ):
         """Push tokens and their functions to the stream."""
         for i, token in enumerate(tokens):
@@ -90,8 +95,9 @@ class ComplexTokenStream:
                     self.token_functions[token] = functions[i]
 
     def process_stream(
-        self, batch_size: int = 32
-    ) -> Tuple[List[int], List[TokenFunction]]:
+        self,
+        batch_size: int = 32,
+    ) -> tuple[list[int], list[TokenFunction]]:
         """Process token stream in batches."""
         tokens = []
         functions = []
@@ -123,7 +129,7 @@ class ComplexTokenizer(nn.Module):
 
     def __init__(
         self,
-        w2v_path: Optional[str] = None,
+        w2v_path: str | None = None,
         num_basis: int = 32,
         max_vocab_size: int = 50000,
         cache_size: int = 10000,
@@ -170,7 +176,7 @@ class ComplexTokenizer(nn.Module):
         """Load word2vec embeddings and convert to complex periodic functions."""
         # Load word2vec embeddings
         embeddings = {}
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 values = line.split()
                 word = values[0]
@@ -202,12 +208,15 @@ class ComplexTokenizer(nn.Module):
         # Create complex embedding
         x = np.linspace(0, 1, self.num_basis)
         func.embedding = _compute_basis_functions(
-            x, func.frequencies, func.phases, func.amplitudes
+            x,
+            func.frequencies,
+            func.phases,
+            func.amplitudes,
         )
 
         return func
 
-    def encode(self, text: str) -> Tuple[torch.Tensor, List[TokenFunction]]:
+    def encode(self, text: str) -> tuple[torch.Tensor, list[TokenFunction]]:
         """Convert text to token IDs and functions."""
         words = text.lower().split()
         ids = []
@@ -232,7 +241,9 @@ class ComplexTokenizer(nn.Module):
         return torch.tensor(ids, device=self.device), functions
 
     def decode(
-        self, ids: torch.Tensor, functions: Optional[List[TokenFunction]] = None
+        self,
+        ids: torch.Tensor,
+        functions: list[TokenFunction] | None = None,
     ) -> str:
         """Convert token IDs and functions back to text."""
         words = []
@@ -298,7 +309,7 @@ class ComplexTokenEmbedding(nn.Module):
         vocab_size: int,
         num_basis: int = 32,
         embedding_dim: int = 128,
-        ops: Optional[MultivectorOps] = None,
+        ops: MultivectorOps | None = None,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -318,7 +329,10 @@ class ComplexTokenEmbedding(nn.Module):
             # Initialize with smaller values and proper scaling
             weights = (
                 torch.randn(
-                    chunk_vocab_size, num_basis, embedding_dim, dtype=torch.complex64
+                    chunk_vocab_size,
+                    num_basis,
+                    embedding_dim,
+                    dtype=torch.complex64,
                 )
                 * 0.02
             )
@@ -385,7 +399,7 @@ class ImageToComplex(nn.Module):
         self.image_size = image_size
         self.basis_set = ComplexBasisSet(num_basis)
 
-    def _preprocess_image(self, image: Union[str, bytes, np.ndarray]) -> torch.Tensor:
+    def _preprocess_image(self, image: str | bytes | np.ndarray) -> torch.Tensor:
         """Convert image to tensor."""
         if isinstance(image, str):
             # Load from file
@@ -415,7 +429,7 @@ class ImageToComplex(nn.Module):
         # Convert back to tensor
         return torch.from_numpy(dct_coeffs)
 
-    def forward(self, image: Union[str, bytes, np.ndarray]) -> torch.Tensor:
+    def forward(self, image: str | bytes | np.ndarray) -> torch.Tensor:
         """Convert image to complex periodic function representation."""
         # Preprocess image
         img_tensor = self._preprocess_image(image)

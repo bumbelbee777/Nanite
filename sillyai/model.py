@@ -1,24 +1,21 @@
-import torch
-import torch.nn as nn
-from typing import Dict, List, Optional, Tuple, Union
 import logging
 import os
 from datetime import datetime
 
-from .core import Transformer
-from .config import ModelConfig, Modality
-from .ops import MultivectorOps
-from .plugin import SillyPlugin
-from .concept import ConceptGraph
+import torch
+import torch.nn as nn
+
 from .complex_tokens import ComplexTokenizer
-from .vm import BytecodeProgram, BytecodeEngine, Opcode
+from .config import Modality, ModelConfig
+from .core import Transformer
 from .modalities import ModalityManager
+from .ops import MultivectorOps
 
 
 class SillyAI(nn.Module):
     """Exported SillyAI class for interfacing with the model."""
 
-    def __init__(self, config: ModelConfig, ops: Optional[MultivectorOps] = None):
+    def __init__(self, config: ModelConfig, ops: MultivectorOps | None = None):
         super().__init__()
         self.config = config
         self.ops = ops or MultivectorOps()
@@ -33,11 +30,11 @@ class SillyAI(nn.Module):
 
         # Add file handler
         fh = logging.FileHandler(
-            f"logs/sillyai_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            f"logs/sillyai_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
         )
         fh.setLevel(logging.INFO)
         formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         )
         fh.setFormatter(formatter)
         self.logger.addHandler(fh)
@@ -67,8 +64,8 @@ class SillyAI(nn.Module):
 
     async def forward(
         self,
-        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
-        mask: Optional[torch.Tensor] = None,
+        x: torch.Tensor | dict[str, torch.Tensor],
+        mask: torch.Tensor | None = None,
         generate_response: bool = False,
         num_tokens: int = 10,
     ) -> torch.Tensor:
@@ -86,7 +83,10 @@ class SillyAI(nn.Module):
         if isinstance(x, dict):
             # Multi-modal input
             return await self._forward_multimodal(
-                x, mask, generate_response, num_tokens
+                x,
+                mask,
+                generate_response,
+                num_tokens,
             )
         else:
             # Single modal input (assumed to be text)
@@ -94,8 +94,8 @@ class SillyAI(nn.Module):
 
     async def _forward_multimodal(
         self,
-        inputs: Dict[str, torch.Tensor],
-        mask: Optional[torch.Tensor] = None,
+        inputs: dict[str, torch.Tensor],
+        mask: torch.Tensor | None = None,
         generate_response: bool = False,
         num_tokens: int = 10,
     ) -> torch.Tensor:
@@ -123,7 +123,9 @@ class SillyAI(nn.Module):
 
         # Process through transformer
         text_features = await self.transformer(
-            text_features, mask, generate_response=False
+            text_features,
+            mask,
+            generate_response=False,
         )
 
         # Process other modalities and fuse with text
@@ -153,7 +155,10 @@ class SillyAI(nn.Module):
         # Generate response if requested
         if generate_response:
             return await self.transformer(
-                fused_features, mask, generate_response=True, num_tokens=num_tokens
+                fused_features,
+                mask,
+                generate_response=True,
+                num_tokens=num_tokens,
             )
 
         return fused_features
@@ -167,7 +172,7 @@ class SillyAI(nn.Module):
         """
         self.modality_manager.add_modality(name, modality_config)
 
-    def process_text(self, text: Union[str, List[str]]) -> torch.Tensor:
+    def process_text(self, text: str | list[str]) -> torch.Tensor:
         """Process text input using Word2VecTokenizer.
 
         Args:
@@ -234,7 +239,7 @@ class SillyAI(nn.Module):
         for i, (concept, score) in enumerate(concepts):
             self.logger.info(f"{i + 1}. {concept}: {score:.4f}")
 
-    def generate_bytecode(self) -> List[Tuple[str, List[float]]]:
+    def generate_bytecode(self) -> list[tuple[str, list[float]]]:
         """Generate bytecode from concept graph."""
         return self.transformer.concept_graph.to_bytecode()
 
@@ -278,7 +283,9 @@ class SillyAI(nn.Module):
         # Generate response
         with torch.no_grad():
             output = await self.transformer(
-                input_tensor, generate_response=True, num_tokens=num_tokens
+                input_tensor,
+                generate_response=True,
+                num_tokens=num_tokens,
             )
 
         # Log generation metrics
@@ -326,7 +333,7 @@ class SillyAI(nn.Module):
 
                 if score >= min_score:
                     self.logger.info(
-                        f"Generated acceptable response on attempt {attempt + 1}"
+                        f"Generated acceptable response on attempt {attempt + 1}",
                     )
                     return response
 

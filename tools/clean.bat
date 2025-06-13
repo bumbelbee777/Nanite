@@ -9,4 +9,4 @@ for /r %%d in (__pycache__) do @if exist "%%d" rmdir /s /q "%%d"
 for /r %%f in (*.pyc) do @if exist "%%f" del /f /q "%%f"
 
 echo.
-echo Cleanup completed! 
+echo Cleanup completed!

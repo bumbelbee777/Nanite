@@ -1,12 +1,13 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
-from collections import deque, defaultdict
-from typing import Optional, Dict, Set, List, Tuple, Any
+
 import logging
-import torch
-import networkx as nx
 import os
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
+
+import networkx as nx
+import torch
 
 from .complex_tokens import ComplexBasisSet
 
@@ -25,19 +26,19 @@ class Connection:
 class Concept:
     name: str
     energy: float = 0.0
-    tags: Set[str] = field(default_factory=set)
+    tags: set[str] = field(default_factory=set)
     description: str = ""
-    domain: Optional[str] = None
-    source: Optional[str] = None
-    token_ids: Set[int] = field(default_factory=set)
-    embedding: Optional[torch.Tensor] = None
+    domain: str | None = None
+    source: str | None = None
+    token_ids: set[int] = field(default_factory=set)
+    embedding: torch.Tensor | None = None
     access_count: int = 0
     last_access_time: int = 0
-    regions: Set[str] = field(default_factory=set)
+    regions: set[str] = field(default_factory=set)
     # New fields for complex periodic function representation
-    basis_weights: Optional[torch.Tensor] = None  # Weights for basis functions
-    composition_weights: Dict[str, float] = field(
-        default_factory=dict
+    basis_weights: torch.Tensor | None = None  # Weights for basis functions
+    composition_weights: dict[str, float] = field(
+        default_factory=dict,
     )  # Weights for composed concepts
     frequency: float = 1.0  # Base frequency for periodic function
     phase: float = 0.0  # Phase offset for periodic function
@@ -47,14 +48,17 @@ class ConceptGraph:
     """Manages a graph of concepts and their relationships."""
 
     def __init__(
-        self, max_size: int = 1000, decay_rate: float = 0.1, num_basis: int = 32
+        self,
+        max_size: int = 1000,
+        decay_rate: float = 0.1,
+        num_basis: int = 32,
     ):
         self.max_size = max_size
         self.decay_rate = decay_rate
         self.num_basis = num_basis
         self.graph = nx.DiGraph()
-        self.concepts: Dict[str, Concept] = {}
-        self.regions: Dict[str, Set[str]] = {}
+        self.concepts: dict[str, Concept] = {}
+        self.regions: dict[str, set[str]] = {}
         self.current_time = 0
 
         # Set up debug logger
@@ -76,7 +80,10 @@ class ConceptGraph:
         self.logger.addHandler(file_handler)
 
     def _log_concept_operation(
-        self, operation: str, concept_name: str, details: Dict = None
+        self,
+        operation: str,
+        concept_name: str,
+        details: dict = None,
     ):
         """Log concept graph operations with details."""
         msg = f"{operation}: {concept_name}"
@@ -87,10 +94,10 @@ class ConceptGraph:
     def add_concept(
         self,
         name: str,
-        embedding: Optional[torch.Tensor] = None,
-        relationships: Optional[Dict[str, float]] = None,
-        basis_weights: Optional[torch.Tensor] = None,
-        composition: Optional[Dict[str, float]] = None,
+        embedding: torch.Tensor | None = None,
+        relationships: dict[str, float] | None = None,
+        basis_weights: torch.Tensor | None = None,
+        composition: dict[str, float] | None = None,
         frequency: float = 1.0,
         phase: float = 0.0,
         **meta,
@@ -102,9 +109,9 @@ class ConceptGraph:
                 name,
                 {
                     "energy": self.concepts[name].energy,
-                    "new_embedding_shape": embedding.shape
-                    if embedding is not None
-                    else None,
+                    "new_embedding_shape": (
+                        embedding.shape if embedding is not None else None
+                    ),
                 },
             )
         else:
@@ -112,12 +119,12 @@ class ConceptGraph:
                 "Add new concept",
                 name,
                 {
-                    "embedding_shape": embedding.shape
-                    if embedding is not None
-                    else None,
-                    "basis_weights_shape": basis_weights.shape
-                    if basis_weights is not None
-                    else None,
+                    "embedding_shape": (
+                        embedding.shape if embedding is not None else None
+                    ),
+                    "basis_weights_shape": (
+                        basis_weights.shape if basis_weights is not None else None
+                    ),
                 },
             )
 
@@ -143,13 +150,15 @@ class ConceptGraph:
             for target, weight in relationships.items():
                 self.graph.add_edge(name, target, weight=weight)
                 self._log_concept_operation(
-                    "Add relationship", name, {"target": target, "weight": weight}
+                    "Add relationship",
+                    name,
+                    {"target": target, "weight": weight},
                 )
 
     def compose_concept(
         self,
         name: str,
-        components: Dict[str, float],
+        components: dict[str, float],
         frequency: float = 1.0,
         phase: float = 0.0,
     ) -> Concept:
@@ -162,7 +171,7 @@ class ConceptGraph:
 
         # Combine basis weights
         basis_weights = torch.zeros(self.num_basis, dtype=torch.complex64)
-        for comp, weight in zip(comp_concepts, components.values()):
+        for comp, weight in zip(comp_concepts, components.values(), strict=False):
             if comp.basis_weights is not None:
                 basis_weights += weight * comp.basis_weights
 
@@ -186,7 +195,7 @@ class ConceptGraph:
 
         return concept
 
-    def get_concept_embedding(self, name: str) -> Optional[torch.Tensor]:
+    def get_concept_embedding(self, name: str) -> torch.Tensor | None:
         """Get the embedding for a concept."""
         if name not in self.graph:
             return None
@@ -201,8 +210,10 @@ class ConceptGraph:
         return self.concepts.get(name).embedding
 
     def get_related_concepts(
-        self, name: str, top_k: int = 5
-    ) -> List[Tuple[str, float]]:
+        self,
+        name: str,
+        top_k: int = 5,
+    ) -> list[tuple[str, float]]:
         """Get top-k related concepts by edge weight."""
         if name not in self.graph:
             return []
@@ -211,7 +222,7 @@ class ConceptGraph:
         related = [(target, data["weight"]) for _, target, data in edges]
         return sorted(related, key=lambda x: x[1], reverse=True)[:top_k]
 
-    def get_top_concepts(self, top_k: int = 10) -> List[Tuple[str, float]]:
+    def get_top_concepts(self, top_k: int = 10) -> list[tuple[str, float]]:
         """Get top-k concepts by PageRank centrality."""
         centrality = nx.pagerank(self.graph)
         return sorted(centrality.items(), key=lambda x: x[1], reverse=True)[:top_k]
@@ -219,7 +230,7 @@ class ConceptGraph:
     def propagate_energy(self):
         """Propagate energy through the concept graph."""
         decay = self.decay_rate
-        new_e = {n: 0.0 for n in self.graph.nodes()}
+        new_e = dict.fromkeys(self.graph.nodes(), 0.0)
         for n in self.graph.nodes():
             e = self.graph.nodes[n]["concept"].energy
             if e <= 0.0:
@@ -278,13 +289,15 @@ class ConceptGraph:
             self.graph.nodes[concept_name]["concept"].regions = set()
         self.graph.nodes[concept_name]["concept"].regions.add(region_name)
 
-    def get_region(self, region_name: str) -> Optional[Set[str]]:
+    def get_region(self, region_name: str) -> set[str] | None:
         """Get all concepts in a region."""
         return self.regions.get(region_name)
 
     def to_bytecode(
-        self, start_concept: Optional[str] = None, max_hops: int = 5
-    ) -> List[tuple]:
+        self,
+        start_concept: str | None = None,
+        max_hops: int = 5,
+    ) -> list[tuple]:
         """Convert concept graph to bytecode with detailed logging."""
         if not self.concepts:
             self.logger.debug("No concepts to convert to bytecode")
@@ -333,7 +346,9 @@ class ConceptGraph:
         else:
             # Start with highest energy concepts
             sorted_concepts = sorted(
-                self.concepts.items(), key=lambda x: x[1].energy, reverse=True
+                self.concepts.items(),
+                key=lambda x: x[1].energy,
+                reverse=True,
             )
             for concept_name, _ in sorted_concepts:
                 if concept_name not in visited:
@@ -347,17 +362,17 @@ class ConceptGraph:
 
         return bytecode
 
-    def update_embeddings(self, embeddings: Dict[str, torch.Tensor]):
+    def update_embeddings(self, embeddings: dict[str, torch.Tensor]):
         """Update concept embeddings."""
         for name, embedding in embeddings.items():
             if name in self.graph:
                 self.graph.nodes[name]["concept"].embedding = embedding
 
-    def get_subgraph(self, concepts: List[str]) -> nx.DiGraph:
+    def get_subgraph(self, concepts: list[str]) -> nx.DiGraph:
         """Get subgraph containing only specified concepts."""
         return self.graph.subgraph(concepts).copy()
 
-    def merge(self, other: "ConceptGraph"):
+    def merge(self, other: ConceptGraph):
         """Merge another concept graph into this one."""
         for node in other.graph.nodes():
             if len(self.graph) < self.max_size:
@@ -402,7 +417,7 @@ class ConceptGraph:
         self.num_basis = state["num_basis"]
         self.basis_set = ComplexBasisSet(self.num_basis)
 
-    def get_embeddings(self) -> Dict[str, torch.Tensor]:
+    def get_embeddings(self) -> dict[str, torch.Tensor]:
         """Get all concept embeddings with logging."""
         embeddings = {
             name: concept.embedding
@@ -419,7 +434,7 @@ class ConceptGraph:
         )
         return embeddings
 
-    def get_relationships(self) -> List[Tuple[int, int, float]]:
+    def get_relationships(self) -> list[tuple[int, int, float]]:
         """Get all relationships with logging."""
         if not self.concepts:
             self.logger.debug("No concepts in graph")

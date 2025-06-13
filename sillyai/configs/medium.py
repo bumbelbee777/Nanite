@@ -1,8 +1,8 @@
-import torch
 from dataclasses import field
-from typing import Set
 
-from sillyai.config import ModelConfig, PrecisionLevel, Modality
+import torch
+
+from sillyai.config import Modality, ModelConfig, PrecisionLevel
 
 
 class MediumModelConfig(ModelConfig):
@@ -30,8 +30,8 @@ class MediumModelConfig(ModelConfig):
     concept_decay_rate: float = 0.1
 
     # Modality support
-    supported_modalities: Set[Modality] = field(
-        default_factory=lambda: {Modality.TEXT, Modality.IMAGE}
+    supported_modalities: set[Modality] = field(
+        default_factory=lambda: {Modality.TEXT, Modality.IMAGE},
     )
 
     # Plugin configuration

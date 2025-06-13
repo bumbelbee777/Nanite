@@ -1,15 +1,15 @@
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-import os
-from datetime import datetime
-from typing import Dict, List, Optional, Any
-import logging
-from pathlib import Path
-import psutil
-import GPUtil
 import json
+import logging
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import GPUtil
+import matplotlib.pyplot as plt
+import numpy as np
+import psutil
+import torch
+from matplotlib.animation import FuncAnimation
 
 from ..plugin import SillyPlugin
 
@@ -51,7 +51,7 @@ class WavefunctionVisualizer:
         ψ: torch.Tensor,
         ψ_pred: torch.Tensor,
         epoch: int,
-        save_path: Optional[str] = None,
+        save_path: str | None = None,
     ):
         """Plot wavefunction and potential.
 
@@ -196,7 +196,11 @@ class WavefunctionVisualizer:
         P_pred_np = P_pred.cpu().numpy()
 
         plt.plot(
-            x_np, P_true_np, color=self.colors["probability"], label="True", linewidth=2
+            x_np,
+            P_true_np,
+            color=self.colors["probability"],
+            label="True",
+            linewidth=2,
         )
         plt.plot(
             x_np,
@@ -225,7 +229,7 @@ class WavefunctionVisualizer:
     def create_animation(
         self,
         x: torch.Tensor,
-        predictions_history: List[torch.Tensor],
+        predictions_history: list[torch.Tensor],
         save_path: str,
         fps: int = 5,
     ):
@@ -305,7 +309,7 @@ class WavefunctionVisualizer:
                 ax2.tick_params(axis="both", which="major", labelsize=10)
                 ax2.set_yticks([-np.pi, -np.pi / 2, 0, np.pi / 2, np.pi])
                 ax2.set_yticklabels(
-                    [r"$-\pi$", r"$-\pi/2$", r"$0$", r"$\pi/2$", r"$\pi$"]
+                    [r"$-\pi$", r"$-\pi/2$", r"$0$", r"$\pi/2$", r"$\pi$"],
                 )
                 ax2.set_ylim([-np.pi * 1.1, np.pi * 1.1])  # Add some padding
 
@@ -325,7 +329,7 @@ class WavefunctionVisualizer:
             anim.save(save_path, writer="pillow", fps=fps)
             logger.info(f"Animation saved to {save_path}")
         except Exception as e:
-            logger.error(f"Failed to save animation: {str(e)}")
+            logger.error(f"Failed to save animation: {e!s}")
         finally:
             plt.close()
 
@@ -368,7 +372,7 @@ class WavefunctionVisualizer:
 
     def load_history(self, path: str):
         """Load visualization history from file."""
-        with open(path, "r") as f:
+        with open(path) as f:
             history_dict = json.load(f)
 
         self.history = {
@@ -384,8 +388,8 @@ class WavefunctionVisualizer:
             save_path: Path to save the visualization
         """
         try:
-            import networkx as nx
             import matplotlib.pyplot as plt
+            import networkx as nx
             from matplotlib.colors import LinearSegmentedColormap
 
             # Create a directed graph
@@ -393,7 +397,7 @@ class WavefunctionVisualizer:
 
             # Add nodes (concepts)
             for concept in concept_graph.get_top_concepts(
-                top_k=50
+                top_k=50,
             ):  # Limit to top 50 concepts
                 name, energy = concept
                 G.add_node(name, energy=energy)
@@ -401,7 +405,8 @@ class WavefunctionVisualizer:
             # Add edges (relationships)
             for concept in G.nodes():
                 related = concept_graph.get_related_concepts(
-                    concept, top_k=5
+                    concept,
+                    top_k=5,
                 )  # Top 5 relationships
                 for target, weight in related:
                     if target in G.nodes():  # Only add if target is in our top concepts
@@ -415,14 +420,19 @@ class WavefunctionVisualizer:
 
             # Create custom colormap for node colors
             cmap = LinearSegmentedColormap.from_list(
-                "energy_cmap", ["#ffffff", "#9467bd"]
+                "energy_cmap",
+                ["#ffffff", "#9467bd"],
             )
 
             # Draw nodes
             node_energies = [G.nodes[n]["energy"] for n in G.nodes()]
             node_colors = [cmap(e) for e in node_energies]
             nx.draw_networkx_nodes(
-                G, pos, node_color=node_colors, node_size=1000, alpha=0.8
+                G,
+                pos,
+                node_color=node_colors,
+                node_size=1000,
+                alpha=0.8,
             )
 
             # Draw edges with varying widths based on weight
@@ -458,7 +468,7 @@ class WavefunctionVisualizer:
 
         except ImportError as e:
             logger.error(
-                f"Failed to import required libraries for concept graph visualization: {e}"
+                f"Failed to import required libraries for concept graph visualization: {e}",
             )
         except Exception as e:
             logger.error(f"Error creating concept graph visualization: {e}")
@@ -504,7 +514,7 @@ class ModelProfiler:
         """Record start of epoch."""
         self.epoch_start_time = datetime.now()
 
-    def end_epoch(self, epoch: int, metrics: Dict[str, float]):
+    def end_epoch(self, epoch: int, metrics: dict[str, float]):
         """Record end of epoch and update metrics."""
         # Record metrics
         for key, value in metrics.items():
@@ -534,7 +544,7 @@ class ModelProfiler:
         """Update resource usage statistics."""
         # CPU and memory usage
         self.metrics["cpu_memory"].append(
-            self.process.memory_info().rss / 1024 / 1024
+            self.process.memory_info().rss / 1024 / 1024,
         )  # MB
 
         # GPU usage if available
@@ -621,7 +631,7 @@ class ModelProfiler:
         plt.savefig(save_path)
         plt.close()
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         """Get summary statistics of metrics."""
         summary = {}
         for key, values in self.metrics.items():
@@ -636,7 +646,10 @@ class ModelProfiler:
         return summary
 
     def create_resource_animation(
-        self, save_path: str, fps: int = 5, window_size: int = 20
+        self,
+        save_path: str,
+        fps: int = 5,
+        window_size: int = 20,
     ):
         """Create animation of resource usage over time.
 
@@ -738,11 +751,11 @@ class ModelProfiler:
         try:
             anim.save(save_path, writer="pillow", fps=fps)
         except Exception as e:
-            logger.error(f"Failed to save animation: {str(e)}")
+            logger.error(f"Failed to save animation: {e!s}")
         finally:
             plt.close()
 
-    def plot_resource_usage(self, save: bool = True, save_path: Optional[str] = None):
+    def plot_resource_usage(self, save: bool = True, save_path: str | None = None):
         """Plot resource usage over time.
 
         Args:
@@ -805,7 +818,7 @@ class ModelProfiler:
             plt.tight_layout()
             plt.show()
 
-    def get_resource_summary(self) -> Dict[str, Dict[str, float]]:
+    def get_resource_summary(self) -> dict[str, dict[str, float]]:
         """Get summary statistics of resource usage."""
         summary = {}
         for key in ["gpu_memory", "cpu_memory", "batch_time", "epoch_time"]:
@@ -858,14 +871,14 @@ class SillyAIVisualizerPlugin(SillyPlugin):
         """Initialize visualization plugin."""
         super().on_init(model)
         logger.info(
-            f"Visualizer plugin initialized with save directory: {self.save_dir}"
+            f"Visualizer plugin initialized with save directory: {self.save_dir}",
         )
 
     def on_epoch_start(self, epoch: int):
         """Record start of epoch."""
         self.epoch_start_time = datetime.now()
 
-    def on_epoch_end(self, epoch: int, metrics: Dict[str, float]):
+    def on_epoch_end(self, epoch: int, metrics: dict[str, float]):
         """Record end of epoch and update visualizations."""
         # Record metrics
         for key, value in metrics.items():
@@ -890,13 +903,13 @@ class SillyAIVisualizerPlugin(SillyPlugin):
 
     def _update_resource_usage(self):
         """Update resource usage statistics."""
-        import psutil
         import GPUtil
+        import psutil
 
         # CPU and memory usage
         process = psutil.Process()
         self.resource_history["memory"].append(
-            process.memory_info().rss / 1024 / 1024
+            process.memory_info().rss / 1024 / 1024,
         )  # MB
         self.resource_history["cpu_percent"].append(process.cpu_percent())
 
@@ -963,7 +976,9 @@ class SillyAIVisualizerPlugin(SillyPlugin):
         plt.subplot(2, 2, 1)
         plt.plot(self.resource_history["memory"], label="RAM", color="#1f77b4")
         plt.plot(
-            self.resource_history["gpu_memory"], label="GPU Memory", color="#ff7f0e"
+            self.resource_history["gpu_memory"],
+            label="GPU Memory",
+            color="#ff7f0e",
         )
         plt.xlabel("Epoch")
         plt.ylabel("Memory (MB)")
@@ -974,7 +989,9 @@ class SillyAIVisualizerPlugin(SillyPlugin):
         # Plot CPU usage
         plt.subplot(2, 2, 2)
         plt.plot(
-            self.resource_history["cpu_percent"], label="CPU Usage", color="#2ca02c"
+            self.resource_history["cpu_percent"],
+            label="CPU Usage",
+            color="#2ca02c",
         )
         plt.xlabel("Epoch")
         plt.ylabel("Usage (%)")
@@ -985,7 +1002,9 @@ class SillyAIVisualizerPlugin(SillyPlugin):
         # Plot GPU usage
         plt.subplot(2, 2, 3)
         plt.plot(
-            self.resource_history["gpu_percent"], label="GPU Usage", color="#d62728"
+            self.resource_history["gpu_percent"],
+            label="GPU Usage",
+            color="#d62728",
         )
         plt.xlabel("Epoch")
         plt.ylabel("Usage (%)")
@@ -1020,7 +1039,7 @@ class SillyAIVisualizerPlugin(SillyPlugin):
         ψ: torch.Tensor,
         ψ_pred: torch.Tensor,
         epoch: int,
-        save_path: Optional[str] = None,
+        save_path: str | None = None,
     ):
         """Plot wavefunction and potential.
 
@@ -1163,7 +1182,11 @@ class SillyAIVisualizerPlugin(SillyPlugin):
 
         # Create animation
         anim = FuncAnimation(
-            fig, update, frames=len(self.wavefunction_history), interval=200, blit=False
+            fig,
+            update,
+            frames=len(self.wavefunction_history),
+            interval=200,
+            blit=False,
         )
 
         # Save animation
@@ -1195,7 +1218,7 @@ class SillyAIVisualizerPlugin(SillyPlugin):
         self.prediction_history = state["prediction_history"]
 
 
-def find_best_model(model_dir: str = "checkpoints") -> Optional[str]:
+def find_best_model(model_dir: str = "checkpoints") -> str | None:
     """Find the best model checkpoint."""
     model_dir = Path(model_dir)
     checkpoints = list(model_dir.glob("best_*.pt"))

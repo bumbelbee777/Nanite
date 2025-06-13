@@ -1,38 +1,21 @@
 from __future__ import annotations
 
-import asyncio
-import copy
-import logging
-import random
-from collections import Counter, defaultdict, deque
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
-
+import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
-from torch import nn, linalg as LA
-import numpy as np
 
-from sillyai.config import ModelConfig, PrecisionLevel, Modality
+from sillyai.concept import ConceptGraph
+from sillyai.config import Modality, ModelConfig, PrecisionLevel
 from sillyai.core import (
-    ComplexLayerNorm,
-    DynamicActivation,
-    FeatureRouter,
-    LinearLayer,
-    MultivectorOps,
-    TaskComplexityEstimator,
-    TransformerBlock,
-    Transformer,
-    TransformerLayer,
-    PositionalEncoding,
+    ComplexLoss,
     ComplexMLP,
-    LayerNorm,
+    MultivectorOps,
+    PositionalEncoding,
+    TransformerLayer,
 )
 from sillyai.model import SillyAI
 from sillyai.ops import AsyncLRUTensorCache
-from sillyai.concept import ConceptGraph
-from sillyai.core import ComplexLoss
 from sillyai.plugins.trainer import SillyAITrainerPlugin
 
 
@@ -88,10 +71,12 @@ class TestConceptGraph:
         graph.propagate_energy()
         graph.concepts["A"].access_count += 1  # Increase access for 'A'
         graph.update_n_cluster = lambda min_energy, purge_threshold: graph.prune(
-            energy_thresh=min_energy, access_thresh=purge_threshold
+            energy_thresh=min_energy,
+            access_thresh=purge_threshold,
         )
         graph.update_n_cluster(
-            min_energy=0.1, purge_threshold=2
+            min_energy=0.1,
+            purge_threshold=2,
         )  # Assuming at least 3 concepts, keeping top 2
         assert len(graph.concepts) <= 2  # Should have pruned at least one
 
@@ -114,7 +99,8 @@ class TestConceptGraph:
         assert graph.concepts["fruit"].energy > 0
         assert graph.concepts["red"].energy > 0
         graph.update_n_cluster = lambda min_energy, purge_threshold: graph.prune(
-            energy_thresh=min_energy, access_thresh=purge_threshold
+            energy_thresh=min_energy,
+            access_thresh=purge_threshold,
         )
         graph.update_n_cluster(min_energy=0.1, purge_threshold=2)
 

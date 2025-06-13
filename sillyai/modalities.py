@@ -1,53 +1,29 @@
-from typing import Dict, List, Optional, Set, Tuple, Union, Any
-from pathlib import Path
+import gc
+import multiprocessing as mp
+import re
+import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from dataclasses import dataclass
+from threading import Lock
+
+import bitarray
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-from .config import ModelConfig, Modality
-from .ops import MultivectorOps, TensorCache, MixedPrecisionRouter, Quantizer
-from .shared import get_shared_ops
-import gensim
-from gensim.models import KeyedVectors
-from .core import LinearLayer, FeatureRouter
-import re
-import gc
-import os
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-import asyncio
-import multiprocessing as mp
-from multiprocessing.managers import SharedMemoryManager
-from functools import lru_cache
-import json
-import logging
-from datetime import datetime
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
-import aiohttp
-from collections import deque
-import hashlib
-from threading import Lock
-import array
-import mmap
-import struct
-import ctypes
-from dataclasses import dataclass
-import bitarray
-import numpy.typing as npt
-import queue
-import time
-import warnings
-import numba
 from numba import jit, prange
-from scipy.fft import dct, idct
+from scipy.fft import dct
+
 from .complex_tokens import (
     ComplexBasisSet,
     ComplexTokenEmbedding,
-    TokenFunction,
     ComplexTokenStream,
+    TokenFunction,
     _compute_basis_functions,
 )
+from .config import ModelConfig
+from .core import LinearLayer
+from .ops import MixedPrecisionRouter, MultivectorOps, Quantizer
+from .shared import get_shared_ops
 
 
 @jit(nopython=True, parallel=True)
@@ -71,7 +47,7 @@ class TokenView:
     start: int  # Start bit position
     length: int  # Length in bits
 
-    def to_tokens(self) -> List[int]:
+    def to_tokens(self) -> list[int]:
         """Convert bit-packed view to token list."""
         tokens = []
         for i in range(self.length):
@@ -103,7 +79,7 @@ class RingBuffer:
         self.head = next_head
         return True
 
-    def pop(self) -> Optional[int]:
+    def pop(self) -> int | None:
         """Pop item from buffer if available."""
         if self.head == self.tail:
             return None
@@ -111,7 +87,7 @@ class RingBuffer:
         self.tail = (self.tail + 1) & self.mask
         return item
 
-    def peek(self) -> Optional[int]:
+    def peek(self) -> int | None:
         """Peek at next item without removing."""
         if self.head == self.tail:
             return None
@@ -160,11 +136,11 @@ class AoSoA:
         self.data[idx] = vec
         self.masks[idx] = mask
 
-    def get_token(self, idx: int) -> Tuple[np.ndarray, bool]:
+    def get_token(self, idx: int) -> tuple[np.ndarray, bool]:
         """Get token vector and mask."""
         return self.data[idx], self.masks[idx]
 
-    def batch_get(self, indices: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def batch_get(self, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Get multiple tokens efficiently."""
         return self.data[indices], self.masks[indices]
 
@@ -175,9 +151,9 @@ class TokenStream:
     def __init__(self, buffer_size: int = 1024, num_workers: int = 4):
         self.buffer = RingBuffer(buffer_size)
         self.workers = ThreadPoolExecutor(max_workers=num_workers)
-        self.views: List[TokenView] = []
+        self.views: list[TokenView] = []
 
-    def push_tokens(self, tokens: List[int]):
+    def push_tokens(self, tokens: list[int]):
         """Push tokens to stream."""
         for token in tokens:
             while not self.buffer.push(token):
@@ -210,10 +186,10 @@ class ImageModality(nn.Module):
         ops: MultivectorOps,
         input_channels: int = 3,
         output_dim: int = 256,
-        channels: List[int] = [64, 128, 256, 512],
-        kernel_sizes: Optional[List[int]] = None,
+        channels: list[int] = [64, 128, 256, 512],
+        kernel_sizes: list[int] | None = None,
         pool_type: str = "adaptive",  # "adaptive" | "max" | "none"
-        pool_size: Tuple[int, int] = (4, 4),  # for adaptive
+        pool_size: tuple[int, int] = (4, 4),  # for adaptive
         dropout: float = 0.3,
         activation: str = "gelu",
         use_batchnorm: bool = True,
@@ -235,20 +211,22 @@ class ImageModality(nn.Module):
         # Build conv params for each block
         self.convs = nn.ModuleList()
         in_c = input_channels
-        for out_c, k in zip(channels, self.kernel_sizes):
+        for out_c, k in zip(channels, self.kernel_sizes, strict=False):
             conv = nn.ModuleDict(
                 {
                     "weight": nn.Parameter(
-                        torch.randn(out_c, in_c, k, k, dtype=torch.complex64) * 0.02
+                        torch.randn(out_c, in_c, k, k, dtype=torch.complex64) * 0.02,
                     ),
                     "bias": nn.Parameter(torch.zeros(out_c, dtype=torch.complex64)),
                     # real & imag BatchNorm
                     "bn_real": nn.BatchNorm2d(out_c) if use_batchnorm else None,
                     "bn_imag": nn.BatchNorm2d(out_c) if use_batchnorm else None,
-                    "act": getattr(nn, activation.title())()
-                    if hasattr(nn, activation.title())
-                    else nn.GELU(),
-                }
+                    "act": (
+                        getattr(nn, activation.title())()
+                        if hasattr(nn, activation.title())
+                        else nn.GELU()
+                    ),
+                },
             )
             self.convs.append(conv)
             in_c = out_c
@@ -264,7 +242,7 @@ class ImageModality(nn.Module):
         # FC as weight & bias (complex)
         # flatten_dim computed lazily on first forward if pool_type=="none"
         self.fc_weight = nn.Parameter(
-            torch.randn(1, output_dim, dtype=torch.complex64)
+            torch.randn(1, output_dim, dtype=torch.complex64),
         )  # placeholder
         self.fc_bias = nn.Parameter(torch.zeros(output_dim, dtype=torch.complex64))
         self._flatten_dim = None
@@ -272,7 +250,9 @@ class ImageModality(nn.Module):
         self.dropout = nn.Dropout2d(dropout)
 
     async def forward(
-        self, x: torch.Tensor, input_size: Optional[Tuple[int, int]] = None
+        self,
+        x: torch.Tensor,
+        input_size: tuple[int, int] | None = None,
     ) -> torch.Tensor:
         """
         x: real tensor [B, C, H, W]
@@ -309,7 +289,9 @@ class ImageModality(nn.Module):
                 self._flatten_dim = flat.shape[-1]
                 # reinit fc weight to correct shape
                 self.fc_weight.data = torch.randn(
-                    self._flatten_dim, self.output_dim, dtype=torch.complex64
+                    self._flatten_dim,
+                    self.output_dim,
+                    dtype=torch.complex64,
                 )
             x_flat = flat
 
@@ -345,7 +327,9 @@ class ImageModality(nn.Module):
             if self._flatten_dim is None:
                 self._flatten_dim = flat.shape[-1]
                 self.fc_weight.data = torch.randn(
-                    self._flatten_dim, self.output_dim, dtype=torch.complex64
+                    self._flatten_dim,
+                    self.output_dim,
+                    dtype=torch.complex64,
                 )
             x_flat = flat
 
@@ -364,7 +348,7 @@ class Word2VecTokenizer(nn.Module):
         pad_token: str = "<pad>",
         lowercase: bool = True,
         device: str = "cpu",
-        ops: Optional[MultivectorOps] = None,
+        ops: MultivectorOps | None = None,
         max_vocab_size: int = 50000,
         cache_size: int = 10000,
         quantize: bool = True,
@@ -410,22 +394,25 @@ class Word2VecTokenizer(nn.Module):
         # Initialize components with memory-efficient settings
         self.precision_router = MixedPrecisionRouter()
         self.quantizer = Quantizer(
-            qmin=-(2 ** (quantize_bits - 1)), qmax=2 ** (quantize_bits - 1) - 1
+            qmin=-(2 ** (quantize_bits - 1)),
+            qmax=2 ** (quantize_bits - 1) - 1,
         )
 
         # Initialize complex-valued components with reduced memory footprint
         self.basis_set = ComplexBasisSet(num_basis)
         self.token_embedding = ComplexTokenEmbedding(
-            max_vocab_size, num_basis, ops=self.ops
+            max_vocab_size,
+            num_basis,
+            ops=self.ops,
         )
 
         # Initialize lock-free data structures with optimized memory usage
         self.token_stream = ComplexTokenStream(buffer_size, num_workers, num_basis)
         self.bloom_trie = ConcurrentBloomTrie(cache_size)
-        
+
         # Build initial vocab to get vector size
         self._build_vocab_from_header()
-        
+
         # Initialize token storage with correct vector size
         self.token_storage = AoSoA(max_vocab_size, self.vec_size)
 
@@ -464,13 +451,13 @@ class Word2VecTokenizer(nn.Module):
         # Create thread pool for tokenization with limited workers
         self.tokenizer_pool = ThreadPoolExecutor(
             max_workers=min(self.num_workers, 4),  # Limit initial workers
-            thread_name_prefix="tokenizer"
+            thread_name_prefix="tokenizer",
         )
 
         # Create process pool for heavy computations with memory limits
         self.process_pool = ProcessPoolExecutor(
             max_workers=min(self.num_workers, 2),  # Start with fewer processes
-            mp_context=mp.get_context("spawn")
+            mp_context=mp.get_context("spawn"),
         )
 
     def _load_embedding_chunk(self, chunk_idx: int) -> torch.Tensor:
@@ -502,10 +489,10 @@ class Word2VecTokenizer(nn.Module):
 
             # Convert to tensor with memory-efficient dtype
             chunk = torch.tensor(vectors, dtype=torch.float32, device=self.device)
-            
+
             # Store in cache with size limit
             self._embedding_chunks[chunk_idx] = chunk
-            
+
             # Implement LRU cache
             if len(self._embedding_chunks) > 10:
                 oldest_chunk = min(self._embedding_chunks.keys())
@@ -520,35 +507,35 @@ class Word2VecTokenizer(nn.Module):
             self._embedding = torch.zeros(
                 (self.vocab_size, self.vec_size),
                 dtype=torch.float32,
-                device=self.device
+                device=self.device,
             )
-            
+
             # Load chunks in parallel with memory limits
             with ThreadPoolExecutor(max_workers=min(self.num_workers, 4)) as executor:
                 futures = []
                 num_chunks = (self.vocab_size + self.chunk_size - 1) // self.chunk_size
-                
+
                 # Process chunks in smaller batches
                 batch_size = 2  # Process 2 chunks at a time
                 for i in range(0, num_chunks, batch_size):
                     batch_end = min(i + batch_size, num_chunks)
                     batch_futures = []
-                    
+
                     for j in range(i, batch_end):
                         future = executor.submit(self._load_embedding_chunk, j)
                         batch_futures.append((j, future))
-                    
+
                     # Process batch results
                     for chunk_idx, future in batch_futures:
                         chunk = future.result()
                         start_idx = chunk_idx * self.chunk_size
                         end_idx = min(start_idx + self.chunk_size, self.vocab_size)
                         self._embedding[start_idx:end_idx] = chunk
-                        
+
                         # Clear some memory
                         if chunk_idx in self._embedding_chunks:
                             del self._embedding_chunks[chunk_idx]
-                    
+
                     # Force garbage collection after each batch
                     gc.collect()
 
@@ -569,12 +556,15 @@ class Word2VecTokenizer(nn.Module):
         # Create complex embedding
         x = np.linspace(0, 1, self.num_basis)
         func.embedding = _compute_basis_functions(
-            x, func.frequencies, func.phases, func.amplitudes
+            x,
+            func.frequencies,
+            func.phases,
+            func.amplitudes,
         )
 
         return func
 
-    def tokenize(self, text: str) -> Tuple[List[str], List[TokenFunction]]:
+    def tokenize(self, text: str) -> tuple[list[str], list[TokenFunction]]:
         """Tokenize text with complex-valued periodic functions."""
         # Check bloom trie first
         if not self.bloom_trie.contains(text):
@@ -613,8 +603,9 @@ class Word2VecTokenizer(nn.Module):
         return self.token_stream.process_stream()
 
     def _tokenize_sentence(
-        self, sentence: str
-    ) -> Tuple[List[str], List[TokenFunction]]:
+        self,
+        sentence: str,
+    ) -> tuple[list[str], list[TokenFunction]]:
         """Tokenize a single sentence with complex-valued periodic functions."""
         # Use regex for better tokenization
         words = re.findall(r"\b\w+(?:'\w+)?\b", sentence)
@@ -636,7 +627,7 @@ class Word2VecTokenizer(nn.Module):
 
         return tokens, functions
 
-    def _process_word(self, word: str) -> Tuple[str, TokenFunction]:
+    def _process_word(self, word: str) -> tuple[str, TokenFunction]:
         """Process a single word with complex-valued periodic functions."""
         if word in self.vocab:
             # Get vector from model
@@ -678,7 +669,7 @@ class Word2VecTokenizer(nn.Module):
 
         return self.unk_token
 
-    def _check_subword(self, subword: str) -> Optional[str]:
+    def _check_subword(self, subword: str) -> str | None:
         """Check if a subword exists in the index."""
         if subword in self.subword_index:
             return self.subword_index[subword][0]
@@ -687,10 +678,10 @@ class Word2VecTokenizer(nn.Module):
     def encode(
         self,
         text: str,
-        max_length: Optional[int] = None,
+        max_length: int | None = None,
         padding: bool = False,
-        return_tensors: Optional[str] = None,
-    ) -> Union[Tuple[List[int], List[TokenFunction]], torch.Tensor]:
+        return_tensors: str | None = None,
+    ) -> tuple[list[int], list[TokenFunction]] | torch.Tensor:
         """Encode text to token IDs and functions."""
         # Tokenize
         tokens, functions = self.tokenize(text)
@@ -716,15 +707,21 @@ class Word2VecTokenizer(nn.Module):
         return ids.tolist(), functions
 
     def batch_encode(
-        self, texts: List[str], max_length: Optional[int] = None
-    ) -> Dict[str, Union[torch.Tensor, List[List[TokenFunction]]]]:
+        self,
+        texts: list[str],
+        max_length: int | None = None,
+    ) -> dict[str, torch.Tensor | list[list[TokenFunction]]]:
         """Encode a batch of texts with complex-valued periodic functions."""
         # Process texts in parallel
         with self.tokenizer_pool as pool:
             futures = []
             for text in texts:
                 future = pool.submit(
-                    self.encode, text, max_length, padding=True, return_tensors="pt"
+                    self.encode,
+                    text,
+                    max_length,
+                    padding=True,
+                    return_tensors="pt",
                 )
                 futures.append(future)
 
@@ -732,7 +729,7 @@ class Word2VecTokenizer(nn.Module):
             results = [f.result() for f in futures]
 
         # Unzip results
-        ids, functions = zip(*results)
+        ids, functions = zip(*results, strict=False)
 
         # Stack tensors
         return {
@@ -743,8 +740,8 @@ class Word2VecTokenizer(nn.Module):
 
     def decode(
         self,
-        ids: Union[List[int], torch.Tensor],
-        functions: Optional[List[TokenFunction]] = None,
+        ids: list[int] | torch.Tensor,
+        functions: list[TokenFunction] | None = None,
     ) -> str:
         """Decode token IDs and functions to text."""
         if isinstance(ids, torch.Tensor):
@@ -755,14 +752,16 @@ class Word2VecTokenizer(nn.Module):
             futures = []
             for i, id in enumerate(ids):
                 future = pool.submit(
-                    self._decode_id, id, functions[i] if functions else None
+                    self._decode_id,
+                    id,
+                    functions[i] if functions else None,
                 )
                 futures.append(future)
 
             # Collect results
             return " ".join([f.result() for f in futures])
 
-    def _decode_id(self, id: int, func: Optional[TokenFunction] = None) -> str:
+    def _decode_id(self, id: int, func: TokenFunction | None = None) -> str:
         """Decode a single ID and function."""
         word = self.reverse_vocab.get(id, self.unk_token)
         if func and word != self.unk_token:
@@ -773,7 +772,7 @@ class Word2VecTokenizer(nn.Module):
     def embed(
         self,
         input_ids: torch.Tensor,
-        token_functions: Optional[List[TokenFunction]] = None,
+        token_functions: list[TokenFunction] | None = None,
     ) -> torch.Tensor:
         """Get embeddings for input IDs and functions."""
         if token_functions:
@@ -791,13 +790,13 @@ class Word2VecTokenizer(nn.Module):
     def __del__(self):
         """Enhanced cleanup with memory management."""
         # Cleanup parallel processing
-        if hasattr(self, 'tokenizer_pool'):
+        if hasattr(self, "tokenizer_pool"):
             self.tokenizer_pool.shutdown()
-        if hasattr(self, 'process_pool'):
+        if hasattr(self, "process_pool"):
             self.process_pool.shutdown()
 
         # Cleanup token stream
-        if hasattr(self, 'token_stream'):
+        if hasattr(self, "token_stream"):
             self.token_stream.close()
 
         # Cleanup model and embeddings
@@ -808,7 +807,7 @@ class Word2VecTokenizer(nn.Module):
         self._embedding_chunks.clear()
 
         # Cleanup token storage
-        if hasattr(self, 'token_storage'):
+        if hasattr(self, "token_storage"):
             del self.token_storage
 
         # Clear vocab dictionaries
@@ -847,9 +846,11 @@ class AudioModality(nn.Module):
         self.stft = nn.Sequential(
             nn.Linear(n_fft // 2 + 1, n_mels),
             nn.LayerNorm(n_mels),
-            getattr(nn, activation.title())()
-            if hasattr(nn, activation.title())
-            else nn.GELU(),
+            (
+                getattr(nn, activation.title())()
+                if hasattr(nn, activation.title())
+                else nn.GELU()
+            ),
             nn.Dropout(dropout),
         )
 
@@ -857,15 +858,19 @@ class AudioModality(nn.Module):
         self.temporal = nn.Sequential(
             nn.Conv1d(n_mels, n_mels * 2, kernel_size=3, padding=1),
             nn.BatchNorm1d(n_mels * 2) if use_batchnorm else nn.Identity(),
-            getattr(nn, activation.title())()
-            if hasattr(nn, activation.title())
-            else nn.GELU(),
+            (
+                getattr(nn, activation.title())()
+                if hasattr(nn, activation.title())
+                else nn.GELU()
+            ),
             nn.Dropout(dropout),
             nn.Conv1d(n_mels * 2, n_mels * 4, kernel_size=3, padding=1),
             nn.BatchNorm1d(n_mels * 4) if use_batchnorm else nn.Identity(),
-            getattr(nn, activation.title())()
-            if hasattr(nn, activation.title())
-            else nn.GELU(),
+            (
+                getattr(nn, activation.title())()
+                if hasattr(nn, activation.title())
+                else nn.GELU()
+            ),
             nn.Dropout(dropout),
         )
 
@@ -873,9 +878,11 @@ class AudioModality(nn.Module):
         self.projection = nn.Sequential(
             nn.Linear(n_mels * 4, output_dim),
             nn.LayerNorm(output_dim),
-            getattr(nn, activation.title())()
-            if hasattr(nn, activation.title())
-            else nn.GELU(),
+            (
+                getattr(nn, activation.title())()
+                if hasattr(nn, activation.title())
+                else nn.GELU()
+            ),
             nn.Dropout(dropout),
         )
 
@@ -890,7 +897,10 @@ class AudioModality(nn.Module):
 
         # Convert to complex via STFT
         x_stft = torch.stft(
-            x, n_fft=self.n_fft, hop_length=self.hop_length, return_complex=True
+            x,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            return_complex=True,
         )  # [B, C, F, T]
 
         # Process frequency domain
@@ -913,7 +923,10 @@ class AudioModality(nn.Module):
         """Sync version for ONNX export."""
         B, C, T = x.shape
         x_stft = torch.stft(
-            x, n_fft=self.n_fft, hop_length=self.hop_length, return_complex=True
+            x,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            return_complex=True,
         )
         x_freq = self.stft(x_stft.abs())
         x_temp = self.temporal(x_freq)
@@ -948,20 +961,25 @@ class ModalityManager(nn.Module):
             device=self.config.device,
             ops=self.ops,  # Use shared ops instance
             max_vocab_size=config.get(
-                "max_vocab_size", 50000
+                "max_vocab_size",
+                50000,
             ),  # Limit vocab size for speed
             cache_size=config.get(
-                "cache_size", 10000
+                "cache_size",
+                10000,
             ),  # Size of LRU cache for tokenization
             quantize=config.get("quantize", True),  # Whether to quantize embeddings
             quantize_bits=config.get(
-                "quantize_bits", 8
+                "quantize_bits",
+                8,
             ),  # Number of bits for quantization
             use_mmap=config.get(
-                "use_mmap", True
+                "use_mmap",
+                True,
             ),  # Whether to use memory mapping for large files
             chunk_size=config.get(
-                "chunk_size", 100000
+                "chunk_size",
+                100000,
             ),  # Size of chunks for processing large files
             subword_fallback=config.get("subword_fallback", True),
         )

@@ -1,10 +1,10 @@
-from enum import Enum, auto
-from typing import Any, Dict, List, Tuple, Union, Optional, Deque
-from collections import deque
+import asyncio
+import math
 import re
 import struct
-import math
-import asyncio
+from collections import deque
+from enum import Enum, auto
+from typing import Any
 
 
 class Opcode(Enum):
@@ -114,7 +114,7 @@ class ExpressionParser:
             return TypedValue("variable", var_name)
         raise ValueError(f"Unknown operand: {operand}")
 
-    def parse_routine_call(self, line: str) -> Tuple[str, List[TypedValue]]:
+    def parse_routine_call(self, line: str) -> tuple[str, list[TypedValue]]:
         """Parses a routine call and its arguments."""
         m = self._routine_pattern.match(line)
         if not m:
@@ -123,7 +123,7 @@ class ExpressionParser:
         args_list = [self.parse(arg.strip()) for arg in args.split(",") if arg.strip()]
         return routine_name, args_list
 
-    def parse_variable_declaration(self, line: str) -> Tuple[str, TypedValue]:
+    def parse_variable_declaration(self, line: str) -> tuple[str, TypedValue]:
         """Parses a variable declaration."""
         if "=" not in line:
             raise ValueError(f"Invalid variable declaration: {line}")
@@ -135,8 +135,8 @@ class ExpressionParser:
 
 class MemoryUnit:
     def __init__(self):
-        self.memory: Dict[int, TypedValue] = {}
-        self.concept_memory: Dict[int, TypedValue] = {}  # Separate memory for concepts
+        self.memory: dict[int, TypedValue] = {}
+        self.concept_memory: dict[int, TypedValue] = {}  # Separate memory for concepts
 
     def load(self, address: int, is_concept: bool = False) -> TypedValue:
         memory = self.concept_memory if is_concept else self.memory
@@ -170,7 +170,7 @@ class MemoryUnit:
             return (0x7FF00000 << 32) | (1 if value.value else 0)
         raise ValueError(f"Cannot NaN-box type: {value.type}")
 
-    def _decode_nan_boxed(self, nan_boxed_value: int) -> Dict[str, Any]:
+    def _decode_nan_boxed(self, nan_boxed_value: int) -> dict[str, Any]:
         # Example decoding logic for NaN-boxing
         if (nan_boxed_value >> 32) == 0x7FF00000:
             raw_value = nan_boxed_value & 0xFFFFFFFF
@@ -186,7 +186,7 @@ class MemoryUnit:
         raise ValueError("Invalid NaN-boxed value")
 
 
-def safe_eval(expression: str, context: Optional[Dict[str, Any]] = None) -> Any:
+def safe_eval(expression: str, context: dict[str, Any] | None = None) -> Any:
     allowed_builtins = {
         "abs": abs,
         "min": min,
@@ -202,7 +202,7 @@ def safe_eval(expression: str, context: Optional[Dict[str, Any]] = None) -> Any:
     return eval(expression, context)
 
 
-def validate_opcode_args(opcode: Opcode, args: List[str]):
+def validate_opcode_args(opcode: Opcode, args: list[str]):
     if opcode in {Opcode.ADD, Opcode.SUB, Opcode.MUL, Opcode.DIV, Opcode.POW}:
         if len(args) != 3:
             raise ValueError(f"Opcode {opcode} requires exactly 3 arguments.")
@@ -218,7 +218,7 @@ def validate_opcode_args(opcode: Opcode, args: List[str]):
 class InstructionPipeline:
     def __init__(
         self,
-        code: List[Tuple[Opcode, List[str]]],
+        code: list[tuple[Opcode, list[str]]],
         prefetch_size: int = 4,
         bundle_size: int = 2,
     ):
@@ -226,9 +226,9 @@ class InstructionPipeline:
         self.ip = 0
         self.prefetch_size = prefetch_size
         self.bundle_size = bundle_size
-        self.prefetched_instructions: Deque[Tuple[Opcode, List[str]]] = deque()
+        self.prefetched_instructions: deque[tuple[Opcode, list[str]]] = deque()
 
-    def fetch_bundle(self) -> List[Tuple[Opcode, List[str]]]:
+    def fetch_bundle(self) -> list[tuple[Opcode, list[str]]]:
         """Fetches a bundle of instructions for parallel execution."""
         if not self.prefetched_instructions:
             self._prefetch()
@@ -257,20 +257,20 @@ class BytecodeEngine:
     def __init__(self, pipeline: InstructionPipeline, memory: MemoryUnit):
         self.pipeline = pipeline
         self.memory = memory
-        self.registers: Dict[str, TypedValue] = {
+        self.registers: dict[str, TypedValue] = {
             f"R{i}": TypedValue("i32", 0) for i in range(512)
         }
-        self.concept_register = Dict[str, TypedValue] = {
+        self.concept_register = dict[str, TypedValue] = {
             f"C{i}": TypedValue("i32", 0) for i in range(512)
         }
-        self.stack: List[TypedValue] = []
+        self.stack: list[TypedValue] = []
         self.halted = False
 
-    async def execute_bundle(self, bundle: List[Tuple[Opcode, List[str]]]):
+    async def execute_bundle(self, bundle: list[tuple[Opcode, list[str]]]):
         tasks = [self._execute_instruction_async(instr) for instr in bundle]
         await asyncio.gather(*tasks)
 
-    async def _execute_instruction_async(self, instr: Tuple[Opcode, List[str]]):
+    async def _execute_instruction_async(self, instr: tuple[Opcode, list[str]]):
         self._execute_instruction(instr)
 
     def execute(self):
@@ -280,7 +280,7 @@ class BytecodeEngine:
                 break
             asyncio.run(self.execute_bundle(bundle))
 
-    def validate_instruction(self, instr: Tuple[Opcode, List[str]]):
+    def validate_instruction(self, instr: tuple[Opcode, list[str]]):
         """Validates instruction parameters and stack state."""
         op, args = instr
         validate_opcode_args(op, args)
@@ -294,7 +294,7 @@ class BytecodeEngine:
             raise ValueError("Stack overflow detected.")
         # Add more validation logic as needed
 
-    async def _execute_instruction(self, instr: Tuple[Opcode, List[str]]):
+    async def _execute_instruction(self, instr: tuple[Opcode, list[str]]):
         self.validate_instruction(instr)
         op, args = instr
         if op == Opcode.NOP:
@@ -331,32 +331,38 @@ class BytecodeEngine:
         elif op == Opcode.ADD:
             reg1, reg2, dest = args
             self.registers[dest] = TypedValue(
-                "i32", self.registers[reg1].value + self.registers[reg2].value
+                "i32",
+                self.registers[reg1].value + self.registers[reg2].value,
             )
         elif op == Opcode.SUB:
             reg1, reg2, dest = args
             self.registers[dest] = TypedValue(
-                "i32", self.registers[reg1].value - self.registers[reg2].value
+                "i32",
+                self.registers[reg1].value - self.registers[reg2].value,
             )
         elif op == Opcode.MUL:
             reg1, reg2, dest = args
             self.registers[dest] = TypedValue(
-                "i32", self.registers[reg1].value * self.registers[reg2].value
+                "i32",
+                self.registers[reg1].value * self.registers[reg2].value,
             )
         elif op == Opcode.DIV:
             reg1, reg2, dest = args
             self.registers[dest] = TypedValue(
-                "i32", self.registers[reg1].value // self.registers[reg2].value
+                "i32",
+                self.registers[reg1].value // self.registers[reg2].value,
             )
         elif op == Opcode.POW:
             reg1, reg2, dest = args
             self.registers[dest] = TypedValue(
-                "i32", self.registers[reg1].value ** self.registers[reg2].value
+                "i32",
+                self.registers[reg1].value ** self.registers[reg2].value,
             )
         elif op == Opcode.SQRT:
             reg, dest = args
             self.registers[dest] = TypedValue(
-                "f32", math.sqrt(self.registers[reg].value)
+                "f32",
+                math.sqrt(self.registers[reg].value),
             )
         elif op == Opcode.ASSERT:
             condition = args[0]
@@ -385,61 +391,72 @@ class BytecodeEngine:
         elif op == Opcode.SIN:
             reg, dest = args
             self.registers[dest] = TypedValue(
-                "f32", math.sin(self.registers[reg].value)
+                "f32",
+                math.sin(self.registers[reg].value),
             )
         elif op == Opcode.COS:
             reg, dest = args
             self.registers[dest] = TypedValue(
-                "f32", math.cos(self.registers[reg].value)
+                "f32",
+                math.cos(self.registers[reg].value),
             )
         elif op == Opcode.TAN:
             reg, dest = args
             self.registers[dest] = TypedValue(
-                "f32", math.tan(self.registers[reg].value)
+                "f32",
+                math.tan(self.registers[reg].value),
             )
         elif op == Opcode.ASIN:
             reg, dest = args
             self.registers[dest] = TypedValue(
-                "f32", math.asin(self.registers[reg].value)
+                "f32",
+                math.asin(self.registers[reg].value),
             )
         elif op == Opcode.ACOS:
             reg, dest = args
             self.registers[dest] = TypedValue(
-                "f32", math.acos(self.registers[reg].value)
+                "f32",
+                math.acos(self.registers[reg].value),
             )
         elif op == Opcode.ATAN:
             reg, dest = args
             self.registers[dest] = TypedValue(
-                "f32", math.atan(self.registers[reg].value)
+                "f32",
+                math.atan(self.registers[reg].value),
             )
         elif op == Opcode.LOG:
             reg, dest = args
             self.registers[dest] = TypedValue(
-                "f32", math.log(self.registers[reg].value)
+                "f32",
+                math.log(self.registers[reg].value),
             )
         elif op == Opcode.LOG10:
             reg, dest = args
             self.registers[dest] = TypedValue(
-                "f32", math.log10(self.registers[reg].value)
+                "f32",
+                math.log10(self.registers[reg].value),
             )
         elif op == Opcode.LN:
             reg, dest = args
             self.registers[dest] = TypedValue(
-                "f32", math.log(self.registers[reg].value)
+                "f32",
+                math.log(self.registers[reg].value),
             )
         elif op == Opcode.IFF:
             condition1, condition2 = args
             if safe_eval(condition1, {"registers": self.registers}) != safe_eval(
-                condition2, {"registers": self.registers}
+                condition2,
+                {"registers": self.registers},
             ):
                 raise AssertionError(f"IFF failed: {condition1} <-> {condition2}")
         elif op == Opcode.IMPLIES:
             condition1, condition2 = args
             if not safe_eval(condition1, {"registers": self.registers}) and safe_eval(
-                condition2, {"registers": self.registers}
+                condition2,
+                {"registers": self.registers},
             ):
                 raise AssertionError(
-                    f"Implication failed: {condition1} -> {condition2}"
+                    f"Implication failed: {condition1} -> {condition2}",
                 )
         elif op == Opcode.FORALL:
             iterable, condition = args
@@ -458,7 +475,9 @@ class BytecodeEngine:
         elif op == Opcode.CORR:
             concept1, concept2, weight = args
             self.concept_graph.add_relationship(
-                concept1, concept2, {"weight": float(weight)}
+                concept1,
+                concept2,
+                {"weight": float(weight)},
             )
         elif op == Opcode.ENER:
             concept, reg = args
@@ -507,7 +526,7 @@ class ExecutionScheduler:
 
 
 class SillyVM:
-    def __init__(self, code: List[Tuple[Opcode, List[str]]]):
+    def __init__(self, code: list[tuple[Opcode, list[str]]]):
         self.parser = ExpressionParser()
         self.memory = MemoryUnit()
         self.pipeline = InstructionPipeline(code)
@@ -551,7 +570,7 @@ class BytecodeProgram:
             [
                 (Opcode[op] if isinstance(op, str) else op, args)
                 for op, args in self.instructions
-            ]
+            ],
         )
 
     def run(self, vm=None):
@@ -561,7 +580,7 @@ class BytecodeProgram:
                 [
                     (Opcode[op] if isinstance(op, str) else op, args)
                     for op, args in self.instructions
-                ]
+                ],
             )
         vm.run()
         return vm

@@ -1,10 +1,8 @@
-import asyncio
 import argparse
-import os
-from typing import Optional
 import logging
-from datetime import datetime
+import os
 import re
+from datetime import datetime
 
 from .partial_solver import PartialSolver
 
@@ -14,7 +12,7 @@ class PartialSolverCLI:
 
     def __init__(self):
         self.parser = self._create_parser()
-        self.model: Optional[PartialSolver] = None
+        self.model: PartialSolver | None = None
 
     def _create_parser(self) -> argparse.ArgumentParser:
         """Create command-line argument parser."""
@@ -41,10 +39,16 @@ class PartialSolverCLI:
             help="Directory for model checkpoints",
         )
         parser.add_argument(
-            "--max-seq-len", type=int, default=512, help="Maximum sequence length"
+            "--max-seq-len",
+            type=int,
+            default=512,
+            help="Maximum sequence length",
         )
         parser.add_argument(
-            "--vocab-size", type=int, default=32000, help="Vocabulary size"
+            "--vocab-size",
+            type=int,
+            default=32000,
+            help="Vocabulary size",
         )
         parser.add_argument(
             "--compile-mode",
@@ -56,10 +60,14 @@ class PartialSolverCLI:
 
         # Training configuration
         parser.add_argument(
-            "--train", action="store_true", help="Train model on Wikipedia data"
+            "--train",
+            action="store_true",
+            help="Train model on Wikipedia data",
         )
         parser.add_argument(
-            "--start-url", type=str, help="Starting Wikipedia URL for training"
+            "--start-url",
+            type=str,
+            help="Starting Wikipedia URL for training",
         )
         parser.add_argument(
             "--max-pages",
@@ -70,13 +78,22 @@ class PartialSolverCLI:
 
         # Generation configuration
         parser.add_argument(
-            "--max-tokens", type=int, default=100, help="Maximum tokens to generate"
+            "--max-tokens",
+            type=int,
+            default=100,
+            help="Maximum tokens to generate",
         )
         parser.add_argument(
-            "--temperature", type=float, default=0.7, help="Sampling temperature"
+            "--temperature",
+            type=float,
+            default=0.7,
+            help="Sampling temperature",
         )
         parser.add_argument(
-            "--top-p", type=float, default=0.9, help="Nucleus sampling probability"
+            "--top-p",
+            type=float,
+            default=0.9,
+            help="Nucleus sampling probability",
         )
 
         return parser
@@ -89,7 +106,7 @@ class PartialSolverCLI:
             format="%(asctime)s - %(levelname)s - %(message)s",
             handlers=[
                 logging.FileHandler(
-                    f"logs/partial_solver_cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+                    f"logs/partial_solver_cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
                 ),
                 logging.StreamHandler(),
             ],
@@ -119,7 +136,8 @@ class PartialSolverCLI:
         logging.info(f"Using compilation mode: {args.compile_mode}")
 
         await self.model.train_on_wikipedia(
-            start_url=args.start_url, max_pages=args.max_pages
+            start_url=args.start_url,
+            max_pages=args.max_pages,
         )
         logging.info("Training completed")
 
@@ -128,7 +146,7 @@ class PartialSolverCLI:
         pattern = r"^https?://[a-z]{2,3}\.wikipedia\.org/wiki/[^:]+$"
         return bool(re.match(pattern, url))
 
-    async def handle_command(self, command: str, args) -> Optional[str]:
+    async def handle_command(self, command: str, args) -> str | None:
         """Handle special commands in chat."""
         if command.startswith("@train "):
             url = command[7:].strip()
@@ -140,7 +158,7 @@ class PartialSolverCLI:
                 return "Training completed successfully!"
             except Exception as e:
                 logging.error(f"Error training on Wikipedia: {e}")
-                return f"Error during training: {str(e)}"
+                return f"Error during training: {e!s}"
 
         return None
 

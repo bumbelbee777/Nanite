@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
-from typing import Optional, Dict, List, Union, Set
 from enum import Enum
+
 import torch
 
 
@@ -81,10 +81,10 @@ class ModelConfig:
     gradient_clip: float = 1.0
 
     # Modality support
-    supported_modalities: Set[Modality] = field(default_factory=lambda: {Modality.TEXT})
+    supported_modalities: set[Modality] = field(default_factory=lambda: {Modality.TEXT})
 
     # Plugin configuration
-    enabled_plugins: List[str] = field(default_factory=list)
+    enabled_plugins: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.enabled_plugins:
@@ -94,7 +94,7 @@ class ModelConfig:
         if Modality.IMAGE in self.supported_modalities:
             if self.image_size <= 0:
                 raise ValueError(
-                    "image_size must be positive when IMAGE modality is supported"
+                    "image_size must be positive when IMAGE modality is supported",
                 )
             if self.image_channels not in [1, 3]:
                 raise ValueError("image_channels must be 1 (grayscale) or 3 (RGB)")
@@ -102,7 +102,7 @@ class ModelConfig:
         if Modality.AUDIO in self.supported_modalities:
             if self.audio_sample_rate <= 0:
                 raise ValueError(
-                    "audio_sample_rate must be positive when AUDIO modality is supported"
+                    "audio_sample_rate must be positive when AUDIO modality is supported",
                 )
             if self.audio_channels not in [1, 2]:
                 raise ValueError("audio_channels must be 1 (mono) or 2 (stereo)")

@@ -1,7 +1,7 @@
-import torch
-import numpy as np
-from typing import List, Dict, Optional, Tuple
 from collections import deque
+
+import numpy as np
+import torch
 
 
 class DynamicLearningRate:
@@ -120,7 +120,7 @@ class DynamicLearningRate:
             self.momentum * self.momentum_buffer + (1 - self.momentum) * lr_change
         )
 
-    def step(self, loss: float, optimizer: torch.optim.Optimizer) -> Dict[str, float]:
+    def step(self, loss: float, optimizer: torch.optim.Optimizer) -> dict[str, float]:
         """Update learning rate based on loss improvement.
 
         Args:
@@ -165,7 +165,8 @@ class DynamicLearningRate:
             lr_change = self.current_lr * (self.reward_factor - 1)
             self._update_momentum(lr_change)
             self.current_lr = min(
-                self.current_lr * self.reward_factor + self.momentum_buffer, self.max_lr
+                self.current_lr * self.reward_factor + self.momentum_buffer,
+                self.max_lr,
             )
             self.best_loss = loss
             self.no_improvement_count = 0
@@ -200,7 +201,7 @@ class DynamicLearningRate:
         for param_group in optimizer.param_groups:
             param_group["lr"] = self.current_lr
 
-    def _get_stats(self) -> Dict[str, float]:
+    def _get_stats(self) -> dict[str, float]:
         """Get current statistics about learning rate and rewards."""
         total = self.rewards + self.punishments
         ratio = self.rewards / total if total > 0 else 0
@@ -215,7 +216,7 @@ class DynamicLearningRate:
             "best_loss": self.best_loss,
         }
 
-    def get_reward_stats(self) -> Dict[str, float]:
+    def get_reward_stats(self) -> dict[str, float]:
         """Get statistics about rewards and punishments."""
         total = self.rewards + self.punishments
         ratio = self.rewards / total if total > 0 else 0

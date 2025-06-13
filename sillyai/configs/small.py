@@ -1,6 +1,6 @@
 from dataclasses import field
-from typing import Set
-from sillyai.config import ModelConfig, PrecisionLevel, Modality
+
+from sillyai.config import Modality, ModelConfig, PrecisionLevel
 
 
 class SmallModelConfig(ModelConfig):
@@ -28,7 +28,7 @@ class SmallModelConfig(ModelConfig):
     concept_decay_rate: float = 0.1
 
     # Modality support
-    supported_modalities: Set[Modality] = field(default_factory=lambda: {Modality.TEXT})
+    supported_modalities: set[Modality] = field(default_factory=lambda: {Modality.TEXT})
 
     # Plugin configuration
     enabled_plugins: list = field(default_factory=lambda: ["trainer"])
