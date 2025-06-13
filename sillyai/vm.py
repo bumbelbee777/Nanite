@@ -6,27 +6,71 @@ import struct
 import math
 import asyncio
 
+
 class Opcode(Enum):
-    NOP = auto(); HLT = auto()
-    LOAD = auto(); LOADC = auto()
-    STORE = auto(); STOREC = auto()
-    PUSH = auto(); POP = auto()
+    NOP = auto()
+    HLT = auto()
+    LOAD = auto()
+    LOADC = auto()
+    STORE = auto()
+    STOREC = auto()
+    PUSH = auto()
+    POP = auto()
     MOV = auto()
-    ADD = auto(); SUB = auto(); MUL = auto(); DIV = auto()
-    POW = auto(); SQRT = auto(); EXP = auto()
-    SIN = auto(); COS = auto(); TAN = auto()
-    ASIN = auto(); ACOS = auto(); ATAN = auto()
-    LOG = auto(); LOG10 = auto(); LN = auto(); ERR = auto()
-    ASSERT = auto(); JM = auto(); CJM = auto()
-    CALL = auto(); RET = auto(); WAIT = auto(); SLEEP = auto()
-    AND = auto(); OR = auto(); NOT = auto()
-    XOR = auto(); NAND = auto(); NOR = auto()
-    IMPLIES = auto(); IFF = auto(); FORALL = auto(); EXISTS = auto()
-    UNIFY = auto(); RESOLVE = auto(); CONTRADICTS = auto()
-    CORR = auto(); ENER = auto(); CASSERT = auto(); CBIND = auto(); CQUERY = auto()
-    CAND = auto(); COR = auto(); CNOT = auto(); CIF = auto(); CCMP = auto(); CLEAN = auto()
+    ADD = auto()
+    SUB = auto()
+    MUL = auto()
+    DIV = auto()
+    POW = auto()
+    SQRT = auto()
+    EXP = auto()
+    SIN = auto()
+    COS = auto()
+    TAN = auto()
+    ASIN = auto()
+    ACOS = auto()
+    ATAN = auto()
+    LOG = auto()
+    LOG10 = auto()
+    LN = auto()
+    ERR = auto()
+    ASSERT = auto()
+    JM = auto()
+    CJM = auto()
+    CALL = auto()
+    RET = auto()
+    WAIT = auto()
+    SLEEP = auto()
+    AND = auto()
+    OR = auto()
+    NOT = auto()
+    XOR = auto()
+    NAND = auto()
+    NOR = auto()
+    IMPLIES = auto()
+    IFF = auto()
+    FORALL = auto()
+    EXISTS = auto()
+    UNIFY = auto()
+    RESOLVE = auto()
+    CONTRADICTS = auto()
+    CORR = auto()
+    ENER = auto()
+    CASSERT = auto()
+    CBIND = auto()
+    CQUERY = auto()
+    CAND = auto()
+    COR = auto()
+    CNOT = auto()
+    CIF = auto()
+    CCMP = auto()
+    CLEAN = auto()
     PAR = auto()
-    ADD_NODE = auto(); ADD_EDGE = auto(); GET_NODE = auto(); GET_EDGE = auto()
+    ADD_NODE = auto()
+    ADD_EDGE = auto()
+    GET_NODE = auto()
+    GET_EDGE = auto()
+
 
 class TypedValue:
     def __init__(self, type_name: str, value: Any):
@@ -36,18 +80,19 @@ class TypedValue:
     def __repr__(self):
         return f"TypedValue(type={self.type}, value={self.value})"
 
+
 class ExpressionParser:
     def __init__(self):
-        self._int_pattern = re.compile(r'^(-?\d+)(?:_(i|u)(8|16|32|64|128))$')
-        self._float_pattern = re.compile(r'^(-?\d+(?:\.\d*)?)(?:_(f)(8|16|32|64|128))$')
-        self._routine_pattern = re.compile(r'^\.([A-Za-z_][A-Za-z0-9_]*)\((.*)\)$')
-        self._variable_pattern = re.compile(r'^%([A-Za-z_][A-Za-z0-9_]*)$')
+        self._int_pattern = re.compile(r"^(-?\d+)(?:_(i|u)(8|16|32|64|128))$")
+        self._float_pattern = re.compile(r"^(-?\d+(?:\.\d*)?)(?:_(f)(8|16|32|64|128))$")
+        self._routine_pattern = re.compile(r"^\.([A-Za-z_][A-Za-z0-9_]*)\((.*)\)$")
+        self._variable_pattern = re.compile(r"^%([A-Za-z_][A-Za-z0-9_]*)$")
 
     def parse(self, operand: str) -> TypedValue:
-        if operand in ('true', 'false'):
-            return TypedValue('bool', operand == 'true')
+        if operand in ("true", "false"):
+            return TypedValue("bool", operand == "true")
         if operand.startswith('"') and operand.endswith('"'):
-            return TypedValue('str', operand[1:-1])
+            return TypedValue("str", operand[1:-1])
         m = self._int_pattern.match(operand)
         if m:
             num, signed, bits = m.groups()
@@ -59,12 +104,14 @@ class ExpressionParser:
         m3 = self._routine_pattern.match(operand)
         if m3:
             routine_name, args = m3.groups()
-            args_list = [self.parse(arg.strip()) for arg in args.split(',') if arg.strip()]
-            return TypedValue('routine', {'name': routine_name, 'args': args_list})
+            args_list = [
+                self.parse(arg.strip()) for arg in args.split(",") if arg.strip()
+            ]
+            return TypedValue("routine", {"name": routine_name, "args": args_list})
         m4 = self._variable_pattern.match(operand)
         if m4:
             var_name = m4.group(1)
-            return TypedValue('variable', var_name)
+            return TypedValue("variable", var_name)
         raise ValueError(f"Unknown operand: {operand}")
 
     def parse_routine_call(self, line: str) -> Tuple[str, List[TypedValue]]:
@@ -73,17 +120,18 @@ class ExpressionParser:
         if not m:
             raise ValueError(f"Invalid routine call: {line}")
         routine_name, args = m.groups()
-        args_list = [self.parse(arg.strip()) for arg in args.split(',') if arg.strip()]
+        args_list = [self.parse(arg.strip()) for arg in args.split(",") if arg.strip()]
         return routine_name, args_list
 
     def parse_variable_declaration(self, line: str) -> Tuple[str, TypedValue]:
         """Parses a variable declaration."""
-        if '=' not in line:
+        if "=" not in line:
             raise ValueError(f"Invalid variable declaration: {line}")
-        var_name, value = map(str.strip, line.split('=', 1))
+        var_name, value = map(str.strip, line.split("=", 1))
         if not self._variable_pattern.match(var_name):
             raise ValueError(f"Invalid variable name: {var_name}")
         return var_name, self.parse(value)
+
 
 class MemoryUnit:
     def __init__(self):
@@ -92,11 +140,11 @@ class MemoryUnit:
 
     def load(self, address: int, is_concept: bool = False) -> TypedValue:
         memory = self.concept_memory if is_concept else self.memory
-        value = memory.get(address, TypedValue('null', None))
-        if value.type == 'nan-boxed':
+        value = memory.get(address, TypedValue("null", None))
+        if value.type == "nan-boxed":
             # Decode NaN-boxed value
             decoded_value = self._decode_nan_boxed(value.value)
-            return TypedValue(decoded_value['type'], decoded_value['value'])
+            return TypedValue(decoded_value["type"], decoded_value["value"])
         return value
 
     def store(self, address: int, value: TypedValue, is_concept: bool = False):
@@ -104,21 +152,21 @@ class MemoryUnit:
         if self._should_nan_box(value):
             # Encode value as NaN-boxed
             nan_boxed_value = self._encode_nan_boxed(value)
-            memory[address] = TypedValue('nan-boxed', nan_boxed_value)
+            memory[address] = TypedValue("nan-boxed", nan_boxed_value)
         else:
             memory[address] = value
 
     def _should_nan_box(self, value: TypedValue) -> bool:
         # Determine if the value should be NaN-boxed (e.g., for performance or safety)
-        return value.type in {'i32', 'f32', 'bool'}
+        return value.type in {"i32", "f32", "bool"}
 
     def _encode_nan_boxed(self, value: TypedValue) -> int:
         # Example encoding logic for NaN-boxing
-        if value.type == 'i32':
+        if value.type == "i32":
             return (0x7FF00000 << 32) | (value.value & 0xFFFFFFFF)
-        elif value.type == 'f32':
-            return struct.unpack('Q', struct.pack('d', value.value))[0]
-        elif value.type == 'bool':
+        elif value.type == "f32":
+            return struct.unpack("Q", struct.pack("d", value.value))[0]
+        elif value.type == "bool":
             return (0x7FF00000 << 32) | (1 if value.value else 0)
         raise ValueError(f"Cannot NaN-box type: {value.type}")
 
@@ -127,22 +175,32 @@ class MemoryUnit:
         if (nan_boxed_value >> 32) == 0x7FF00000:
             raw_value = nan_boxed_value & 0xFFFFFFFF
             if raw_value == 0 or raw_value == 1:
-                return {'type': 'bool', 'value': bool(raw_value)}
+                return {"type": "bool", "value": bool(raw_value)}
             try:
-                return {'type': 'f32', 'value': struct.unpack('d', struct.pack('Q', nan_boxed_value))[0]}
+                return {
+                    "type": "f32",
+                    "value": struct.unpack("d", struct.pack("Q", nan_boxed_value))[0],
+                }
             except:
-                return {'type': 'i32', 'value': raw_value}
+                return {"type": "i32", "value": raw_value}
         raise ValueError("Invalid NaN-boxed value")
+
 
 def safe_eval(expression: str, context: Optional[Dict[str, Any]] = None) -> Any:
     allowed_builtins = {
-        'abs': abs, 'min': min, 'max': max, 'sum': sum,
-        'len': len, 'round': round, 'pow': pow,
-        'math': math
+        "abs": abs,
+        "min": min,
+        "max": max,
+        "sum": sum,
+        "len": len,
+        "round": round,
+        "pow": pow,
+        "math": math,
     }
     context = context or {}
-    context['__builtins__'] = allowed_builtins
+    context["__builtins__"] = allowed_builtins
     return eval(expression, context)
+
 
 def validate_opcode_args(opcode: Opcode, args: List[str]):
     if opcode in {Opcode.ADD, Opcode.SUB, Opcode.MUL, Opcode.DIV, Opcode.POW}:
@@ -156,8 +214,14 @@ def validate_opcode_args(opcode: Opcode, args: List[str]):
             raise ValueError(f"Opcode {opcode} requires exactly 1 argument.")
     # Add more validation rules as needed
 
+
 class InstructionPipeline:
-    def __init__(self, code: List[Tuple[Opcode, List[str]]], prefetch_size: int = 4, bundle_size: int = 2):
+    def __init__(
+        self,
+        code: List[Tuple[Opcode, List[str]]],
+        prefetch_size: int = 4,
+        bundle_size: int = 2,
+    ):
         self.code = code
         self.ip = 0
         self.prefetch_size = prefetch_size
@@ -188,12 +252,17 @@ class InstructionPipeline:
         self.ip = 0
         self.prefetched_instructions.clear()
 
+
 class BytecodeEngine:
     def __init__(self, pipeline: InstructionPipeline, memory: MemoryUnit):
         self.pipeline = pipeline
         self.memory = memory
-        self.registers: Dict[str, TypedValue] = {f"R{i}": TypedValue('i32', 0) for i in range(512)}
-        self.concept_register = Dict[str, TypedValue] = {f"C{i}": TypedValue('i32', 0) for i in range(512)}
+        self.registers: Dict[str, TypedValue] = {
+            f"R{i}": TypedValue("i32", 0) for i in range(512)
+        }
+        self.concept_register = Dict[str, TypedValue] = {
+            f"C{i}": TypedValue("i32", 0) for i in range(512)
+        }
         self.stack: List[TypedValue] = []
         self.halted = False
 
@@ -215,7 +284,11 @@ class BytecodeEngine:
         """Validates instruction parameters and stack state."""
         op, args = instr
         validate_opcode_args(op, args)
-        if op in {Opcode.PUSH, Opcode.POP} and len(self.stack) == 0 and op == Opcode.POP:
+        if (
+            op in {Opcode.PUSH, Opcode.POP}
+            and len(self.stack) == 0
+            and op == Opcode.POP
+        ):
             raise ValueError("Stack underflow detected.")
         if op == Opcode.PUSH and len(self.stack) >= 8192:  # Example stack limit
             raise ValueError("Stack overflow detected.")
@@ -257,22 +330,34 @@ class BytecodeEngine:
             self.registers[dest] = self.registers[src]
         elif op == Opcode.ADD:
             reg1, reg2, dest = args
-            self.registers[dest] = TypedValue('i32', self.registers[reg1].value + self.registers[reg2].value)
+            self.registers[dest] = TypedValue(
+                "i32", self.registers[reg1].value + self.registers[reg2].value
+            )
         elif op == Opcode.SUB:
             reg1, reg2, dest = args
-            self.registers[dest] = TypedValue('i32', self.registers[reg1].value - self.registers[reg2].value)
+            self.registers[dest] = TypedValue(
+                "i32", self.registers[reg1].value - self.registers[reg2].value
+            )
         elif op == Opcode.MUL:
             reg1, reg2, dest = args
-            self.registers[dest] = TypedValue('i32', self.registers[reg1].value * self.registers[reg2].value)
+            self.registers[dest] = TypedValue(
+                "i32", self.registers[reg1].value * self.registers[reg2].value
+            )
         elif op == Opcode.DIV:
             reg1, reg2, dest = args
-            self.registers[dest] = TypedValue('i32', self.registers[reg1].value // self.registers[reg2].value)
+            self.registers[dest] = TypedValue(
+                "i32", self.registers[reg1].value // self.registers[reg2].value
+            )
         elif op == Opcode.POW:
             reg1, reg2, dest = args
-            self.registers[dest] = TypedValue('i32', self.registers[reg1].value ** self.registers[reg2].value)
+            self.registers[dest] = TypedValue(
+                "i32", self.registers[reg1].value ** self.registers[reg2].value
+            )
         elif op == Opcode.SQRT:
             reg, dest = args
-            self.registers[dest] = TypedValue('f32', math.sqrt(self.registers[reg].value))
+            self.registers[dest] = TypedValue(
+                "f32", math.sqrt(self.registers[reg].value)
+            )
         elif op == Opcode.ASSERT:
             condition = args[0]
             if not safe_eval(condition, {"registers": self.registers}):
@@ -286,7 +371,7 @@ class BytecodeEngine:
                 self.pipeline.ip = int(address)
         elif op == Opcode.CALL:
             address = int(args[0])
-            self.stack.append(TypedValue('i32', self.pipeline.ip))
+            self.stack.append(TypedValue("i32", self.pipeline.ip))
             self.pipeline.ip = address
         elif op == Opcode.RET:
             if self.stack:
@@ -299,54 +384,86 @@ class BytecodeEngine:
             await asyncio.sleep(duration / 1000)
         elif op == Opcode.SIN:
             reg, dest = args
-            self.registers[dest] = TypedValue('f32', math.sin(self.registers[reg].value))
+            self.registers[dest] = TypedValue(
+                "f32", math.sin(self.registers[reg].value)
+            )
         elif op == Opcode.COS:
             reg, dest = args
-            self.registers[dest] = TypedValue('f32', math.cos(self.registers[reg].value))
+            self.registers[dest] = TypedValue(
+                "f32", math.cos(self.registers[reg].value)
+            )
         elif op == Opcode.TAN:
             reg, dest = args
-            self.registers[dest] = TypedValue('f32', math.tan(self.registers[reg].value))
+            self.registers[dest] = TypedValue(
+                "f32", math.tan(self.registers[reg].value)
+            )
         elif op == Opcode.ASIN:
             reg, dest = args
-            self.registers[dest] = TypedValue('f32', math.asin(self.registers[reg].value))
+            self.registers[dest] = TypedValue(
+                "f32", math.asin(self.registers[reg].value)
+            )
         elif op == Opcode.ACOS:
             reg, dest = args
-            self.registers[dest] = TypedValue('f32', math.acos(self.registers[reg].value))
+            self.registers[dest] = TypedValue(
+                "f32", math.acos(self.registers[reg].value)
+            )
         elif op == Opcode.ATAN:
             reg, dest = args
-            self.registers[dest] = TypedValue('f32', math.atan(self.registers[reg].value))
+            self.registers[dest] = TypedValue(
+                "f32", math.atan(self.registers[reg].value)
+            )
         elif op == Opcode.LOG:
             reg, dest = args
-            self.registers[dest] = TypedValue('f32', math.log(self.registers[reg].value))
+            self.registers[dest] = TypedValue(
+                "f32", math.log(self.registers[reg].value)
+            )
         elif op == Opcode.LOG10:
             reg, dest = args
-            self.registers[dest] = TypedValue('f32', math.log10(self.registers[reg].value))
+            self.registers[dest] = TypedValue(
+                "f32", math.log10(self.registers[reg].value)
+            )
         elif op == Opcode.LN:
             reg, dest = args
-            self.registers[dest] = TypedValue('f32', math.log(self.registers[reg].value))
+            self.registers[dest] = TypedValue(
+                "f32", math.log(self.registers[reg].value)
+            )
         elif op == Opcode.IFF:
             condition1, condition2 = args
-            if safe_eval(condition1, {"registers": self.registers}) != safe_eval(condition2, {"registers": self.registers}):
+            if safe_eval(condition1, {"registers": self.registers}) != safe_eval(
+                condition2, {"registers": self.registers}
+            ):
                 raise AssertionError(f"IFF failed: {condition1} <-> {condition2}")
         elif op == Opcode.IMPLIES:
             condition1, condition2 = args
-            if not safe_eval(condition1, {"registers": self.registers}) and safe_eval(condition2, {"registers": self.registers}):
-                raise AssertionError(f"Implication failed: {condition1} -> {condition2}")
+            if not safe_eval(condition1, {"registers": self.registers}) and safe_eval(
+                condition2, {"registers": self.registers}
+            ):
+                raise AssertionError(
+                    f"Implication failed: {condition1} -> {condition2}"
+                )
         elif op == Opcode.FORALL:
             iterable, condition = args
-            if not all(safe_eval(condition, {"registers": self.registers}) for _ in safe_eval(iterable, {"registers": self.registers})):
+            if not all(
+                safe_eval(condition, {"registers": self.registers})
+                for _ in safe_eval(iterable, {"registers": self.registers})
+            ):
                 raise AssertionError(f"FORALL failed for iterable: {iterable}")
         elif op == Opcode.EXISTS:
             iterable, condition = args
-            if not any(safe_eval(condition, {"registers": self.registers}) for _ in safe_eval(iterable, {"registers": self.registers})):
+            if not any(
+                safe_eval(condition, {"registers": self.registers})
+                for _ in safe_eval(iterable, {"registers": self.registers})
+            ):
                 raise AssertionError(f"EXISTS failed for iterable: {iterable}")
         elif op == Opcode.CORR:
             concept1, concept2, weight = args
-            self.concept_graph.add_relationship(concept1, concept2, {'weight': float(weight)})
+            self.concept_graph.add_relationship(
+                concept1, concept2, {"weight": float(weight)}
+            )
         elif op == Opcode.ENER:
             concept, reg = args
             energy = self.concept_graph.get_concept(concept).energy
-            self.registers[reg] = TypedValue('f32', energy)
+            self.registers[reg] = TypedValue("f32", energy)
         elif op == Opcode.CASSERT:
             concept, condition = args
             if not safe_eval(condition, {"registers": self.registers}):
@@ -363,16 +480,17 @@ class BytecodeEngine:
             name, reg = args
             concept = self.concept_graph.get_node(name)
             if concept:
-                self.registers[reg] = TypedValue('concept', concept)
+                self.registers[reg] = TypedValue("concept", concept)
             else:
-                self.registers[reg] = TypedValue('null', None)
+                self.registers[reg] = TypedValue("null", None)
         elif op == Opcode.GET_EDGE:
             source, target, reg = args
             connection = self.concept_graph.get_edge(source, target)
             if connection:
-                self.registers[reg] = TypedValue('connection', connection)
+                self.registers[reg] = TypedValue("connection", connection)
             else:
-                self.registers[reg] = TypedValue('null', None)
+                self.registers[reg] = TypedValue("null", None)
+
 
 # ExecutionScheduler Class
 class ExecutionScheduler:
@@ -387,6 +505,7 @@ class ExecutionScheduler:
                 break
             await self.engine.execute_bundle(bundle)
 
+
 class SillyVM:
     def __init__(self, code: List[Tuple[Opcode, List[str]]]):
         self.parser = ExpressionParser()
@@ -398,11 +517,13 @@ class SillyVM:
         scheduler = ExecutionScheduler(self.engine)
         asyncio.run(scheduler.schedule_execution())
 
+
 class BytecodeProgram:
     """
     Represents a human-readable bytecode program that can be executed by the SillyVM.
     Provides utilities for loading from a list of instructions, pretty-printing, and running.
     """
+
     def __init__(self, instructions=None):
         self.instructions = instructions or []  # List of (opcode, [args])
 
@@ -426,11 +547,21 @@ class BytecodeProgram:
 
     def to_pipeline(self):
         """Convert to a pipeline for execution in the VM."""
-        return InstructionPipeline([(Opcode[op] if isinstance(op, str) else op, args) for op, args in self.instructions])
+        return InstructionPipeline(
+            [
+                (Opcode[op] if isinstance(op, str) else op, args)
+                for op, args in self.instructions
+            ]
+        )
 
     def run(self, vm=None):
         """Run this program in a SillyVM instance (if provided) or create a new one."""
         if vm is None:
-            vm = SillyVM([(Opcode[op] if isinstance(op, str) else op, args) for op, args in self.instructions])
+            vm = SillyVM(
+                [
+                    (Opcode[op] if isinstance(op, str) else op, args)
+                    for op, args in self.instructions
+                ]
+            )
         vm.run()
         return vm

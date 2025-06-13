@@ -5,11 +5,11 @@ from .plugins.trainer import SillyAITrainerPlugin
 from .plugins.visualizer import SillyAIVisualizerPlugin
 
 __all__ = [
-    'SillyAI',
-    'ModelConfig',
-    'Modality',
-    'PrecisionLevel',
-    'MultivectorOps',
-    'SillyAITrainerPlugin',
-    'SillyAIVisualizerPlugin'
+    "SillyAI",
+    "ModelConfig",
+    "Modality",
+    "PrecisionLevel",
+    "MultivectorOps",
+    "SillyAITrainerPlugin",
+    "SillyAIVisualizerPlugin",
 ]

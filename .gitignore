@@ -16,3 +16,4 @@ visualizations/
 profiles/
 wavefunctions/
 checkpoints/
+configs/default.json
