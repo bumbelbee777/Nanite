@@ -4,9 +4,9 @@ __pycache__/
 .idx/
 .vscode/
 *.pyc
-sillyai.egg-info/
+nanite.egg-info/
 snapshots/
-sillyai.egg-info/SOURCES.txt
+nanite.egg-info/SOURCES.txt
 .pytest_cache/
 best*.pt
 cache_chunks/
@@ -18,3 +18,5 @@ wavefunctions/
 checkpoints/
 configs/default.json
 pretrained/GoogleNews-vectors-negative300.bin
+training_data/*.txt
+*.pyd

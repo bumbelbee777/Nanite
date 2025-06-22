@@ -40,3 +40,7 @@ pytest>=7.0.0
 # Optional dependencies
 wandb>=0.12.0  # Uncomment if using Weights & Biases
 tensorboard>=2.7.0  # Uncomment if using TensorBoard
+
+pybind11>=2.10.0
+
+gensim>=4.0.0

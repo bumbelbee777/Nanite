@@ -1,4 +1,4 @@
-# 🎮 SillyAI - A Leap Towards AGI?
+# 🎮 Nanite - A Leap Towards AGI?
 
 <div align="center">
 
@@ -10,16 +10,16 @@
 
 ## 🌟 Overview
 
-SillyAI is a complex-valued neuro-symbolic transformer model that combines systems design principles with modern deep learning techniques and reasoning engines. Its unique architecture sets it apart from other models, making it particularly powerful for fields such as reasoning, physics simulations, and quantum system analysis.
+Nanite is a complex-valued neuro-symbolic transformer model that combines systems design principles with modern deep learning techniques and reasoning engines. Its unique architecture sets it apart from other models, making it particularly powerful for fields such as reasoning, physics simulations, and quantum system analysis.
 
 <div align="center">
-  <img src="media/wavefunction_evolution.gif" alt="Wavefunction Evolution" width="600"/>
+  <img src="assets/wavefunction_evolution.gif" alt="Wavefunction Evolution" width="600"/>
   <br>
   <em>Real-time visualization of wavefunction evolution during training</em>
 </div>
 
 <div align="center">
-    <img src="media/resource_usage.png" alt="Resource Usage When Training" width="600"/>
+    <img src="assets/resource_usage.png" alt="Resource Usage When Training" width="600"/>
     <br>
     <em>Resource usage while training</em>
 </div>
@@ -63,7 +63,7 @@ SillyAI is a complex-valued neuro-symbolic transformer model that combines syste
 ```bash
 # Clone the repository
 git clone https://github.com/bumbelbee777/sillyai.git
-cd sillyai
+cd nanite
 
 # Create a virtual environment
 python -m venv venv
@@ -76,8 +76,8 @@ pip install -r requirements.txt
 ## 🎮 Quick Start
 
 ```python
-from sillyai import SillyAI, ModelConfig
-from sillyai.ops import MultivectorOps
+from nanite import Nanite, ModelConfig
+from nanite.ops import MultivectorOps
 
 # Initialize configuration
 config = ModelConfig(
@@ -88,7 +88,7 @@ config = ModelConfig(
 )
 
 # Create model
-model = SillyAI(config, ops=MultivectorOps().compile())
+model = Nanite(config, ops=MultivectorOps().compile())
 
 # Train the model
 model.train()
